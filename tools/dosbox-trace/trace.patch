@@ -1,0 +1,172 @@
+--- src/hardware/hardware.cpp	2019-05-02 17:01:18.000000000 +0000
++++ ../../dosbox-0.74-3/src/hardware/hardware.cpp	2026-11-02 21:01:44.413203426 +0000
+@@ -616,7 +616,7 @@
+ 		}
+ 	}
+ }
+-static void CAPTURE_WaveEvent(bool pressed) {
++void CAPTURE_WaveEvent(bool pressed) {
+ 	if (!pressed)
+ 		return;
+ 	/* Check for previously opened wave file */
+@@ -761,3 +761,88 @@
+ 	test = new HARDWARE(sec);
+ 	sec->AddDestroyFunction(&HARDWARE_Destroy,true);
+ }
++
++
++// ===================== TRACE INSTRUMENTATION (port project) =====================
++#include <stdlib.h>
++#include <string.h>
++#include "keyboard.h"
++#include <unistd.h>
++#include "mouse.h"
++#include "vga.h"
++#include "paging.h"
++#include "cpu.h"
++unsigned long long g_icount=0;
++static unsigned *g_cov=NULL; static unsigned long long g_idle=0,g_lastidle=0; static unsigned idle_lo[8],idle_hi[8]; static int idle_n=0;          // executed instruction start flags, by 32-bit protected-mode EIP
++static unsigned long long g_frame=0, g_last_ic=0;
++static FILE *f_frames=NULL,*f_ports=NULL,*f_script=NULL,*f_cod=NULL; static FILE *f_vram=NULL;
++static unsigned g_codelo=0,g_codehi=0,g_prevhash=0,g_prevpal=0,g_prevcode=0;
++static int g_wave=0; static char g_dir[512];
++static unsigned long long g_nextcmd_frame=0; static char g_cmd[256]; static bool g_havecmd=false;
++static unsigned char g_cs_seen=0;
++static unsigned fnv(const unsigned char*p,size_t n,unsigned h=2166136261u){while(n--){h^=*p++;h*=16777619u;}return h;}
++void trace_init(){
++  if(g_cov) return; const char*d=getenv("TRACE_DIR"); if(!d) d="."; strncpy(g_dir,d,500);
++  g_cov=(unsigned*)calloc(1<<24,4); { const char*e=getenv("TRACE_IDLE"); while(e&&*e&&idle_n<8){ idle_lo[idle_n]=strtoul(e,(char**)&e,0); e++; idle_hi[idle_n]=strtoul(e,(char**)&e,0); idle_n++; if(*e==',')e++; } } char b[600];
++  sprintf(b,"%s/frames.csv",g_dir); f_frames=fopen(b,"w");
++  fprintf(f_frames,"frame,icount,delta,mode,w,h,dstart,palhash,vramhash,codehash,idle\n");
++  sprintf(b,"%s/ports.log",g_dir); f_ports=fopen(b,"wb");
++  sprintf(b,"gzip -1 > %s/vram.bin.gz",g_dir); f_vram=popen(b,"w");
++  sprintf(b,"%s/code_changes.log",g_dir); f_cod=fopen(b,"w");
++  const char*sc=getenv("TRACE_SCRIPT"); if(sc) f_script=fopen(sc,"r");
++  const char*lo=getenv("TRACE_CODELO"); const char*hi=getenv("TRACE_CODEHI");
++  g_codelo=lo?strtoul(lo,0,0):0; g_codehi=hi?strtoul(hi,0,0):0;
++}
++extern "C++" void trace_exec(Bit32u eip){ if(eip<(1u<<24)){ g_cov[eip]++; for(int i=0;i<idle_n;i++) if(eip>=idle_lo[i]&&eip<idle_hi[i]){g_idle++;break;} } }
++void trace_io(int width,bool write,Bitu port,Bitu val){
++  if(!f_ports||!write) return;
++  struct{unsigned long long ic;unsigned short port;unsigned short w;unsigned val;}r={g_icount,(unsigned short)port,(unsigned short)width,(unsigned)val};
++  fwrite(&r,sizeof r,1,f_ports);
++}
++static void dump_cov(){ char b[600]; sprintf(b,"%s/coverage.bin",g_dir); FILE*f=fopen(b,"wb"); if(f){fwrite(g_cov,4,1<<24,f);fclose(f);} }
++static KBD_KEYS keyname(const char*n){
++  if(!strcmp(n,"enter"))return KBD_enter; if(!strcmp(n,"space"))return KBD_space; if(!strcmp(n,"esc"))return KBD_esc;
++  if(!strcmp(n,"left"))return KBD_left; if(!strcmp(n,"right"))return KBD_right; if(!strcmp(n,"up"))return KBD_up; if(!strcmp(n,"down"))return KBD_down;
++  if(!strcmp(n,"ctrl"))return KBD_leftctrl; if(!strcmp(n,"alt"))return KBD_leftalt; if(!strcmp(n,"shift"))return KBD_leftshift;
++  if(!strcmp(n,"tab"))return KBD_tab; if(!strcmp(n,"kp0"))return KBD_kp0; if(!strcmp(n,"kpperiod"))return KBD_kpperiod; if(!strcmp(n,"kp5"))return KBD_kp5; if(!strcmp(n,"y"))return KBD_y; if(!strcmp(n,"n"))return KBD_n;
++  if(n[0]=='f'&&n[1]) return (KBD_KEYS)(KBD_f1+atoi(n+1)-1);
++  if(n[0]>='1'&&n[0]<='9'&&!n[1])return (KBD_KEYS)(KBD_1+n[0]-'1');
++  if(n[0]>='a'&&n[0]<='z'&&!n[1]){ static const char*o="qwertyuiopasdfghjklzxcvbnm"; const char*q=strchr(o,n[0]); return (KBD_KEYS)(KBD_q+(q-o)); }
++  return KBD_NONE; }
++static void run_script(){
++  while(f_script){
++    if(!g_havecmd){ if(!fgets(g_cmd,sizeof g_cmd,f_script)){fclose(f_script);f_script=NULL;break;} if(g_cmd[0]=='#'||g_cmd[0]=='\n')continue;
++      g_nextcmd_frame=strtoull(g_cmd,0,10); g_havecmd=true; }
++    if(g_nextcmd_frame>g_frame) break;
++    char a[32],b[32];int x=0,y=0; char*p=strchr(g_cmd,' '); if(!p){g_havecmd=false;continue;}
++    int n=sscanf(p," %31s %31s %d %d",a,b,&x,&y);
++    if(!strcmp(a,"key")&&n>=3){ /* key <name> <1|0> */ KEYBOARD_AddKey(keyname(b),x!=0); }
++    else if(!strcmp(a,"move")){ int dx=atoi(b); Mouse_CursorMoved((float)dx,(float)x,0,0,true); }
++    else if(!strcmp(a,"btn")){ if(x) Mouse_ButtonPressed(atoi(b)); else Mouse_ButtonReleased(atoi(b)); }
++    else if(!strcmp(a,"wave")){ CAPTURE_WaveEvent(true); g_wave=1; }
++    else if(!strcmp(a,"cov")){ dump_cov(); }
++    else if(!strcmp(a,"quit")){ dump_cov(); fflush(f_frames); fflush(f_ports); fclose(f_frames); fclose(f_ports); fclose(f_cod); if(g_wave)CAPTURE_WaveEvent(true); pclose(f_vram); _exit(0); }
++    g_havecmd=false;
++  }
++}
++void trace_frame(){
++  if(!g_cov) trace_init();
++  g_frame++;
++  unsigned pal=fnv((const unsigned char*)vga.dac.rgb,sizeof vga.dac.rgb);
++  unsigned vh=0; size_t vn=262144; if(vn>vga.vmemsize) vn=vga.vmemsize;
++  vh=fnv(vga.mem.linear,vn);
++  unsigned ch=0;
++  if(g_codehi>g_codelo && cpu.pmode){
++    unsigned char *buf=(unsigned char*)malloc(g_codehi-g_codelo); bool ok=true;
++    for(unsigned a=g_codelo;a<g_codehi;a++){ Bit8u v; if(mem_readb_checked(a,&v)){ok=false;v=0;} buf[a-g_codelo]=v; }
++    ch=ok?fnv(buf,g_codehi-g_codelo):1;
++    static unsigned char *base=NULL; if(ok){ if(!base){ if(g_frame>=(getenv("TRACE_BASEFRAME")?atoi(getenv("TRACE_BASEFRAME")):200)){ base=(unsigned char*)malloc(g_codehi-g_codelo); memcpy(base,buf,g_codehi-g_codelo); fprintf(f_cod,"baseline at frame %llu\n",g_frame);} }
++      else if(ch!=g_prevcode){ int n=0; for(unsigned i=0;i<g_codehi-g_codelo;i++) if(buf[i]!=base[i]){ if(n<20) fprintf(f_cod,"frame %llu: code byte %06x %02x->%02x\n",g_frame,g_codelo+i,base[i],buf[i]); n++; } fprintf(f_cod,"frame %llu: %d bytes differ from baseline\n",g_frame,n); fflush(f_cod);} }
++    g_prevcode=ch; free(buf);
++  }
++  fprintf(f_frames,"%llu,%llu,%llu,%d,%d,%d,%u,%08x,%08x,%08x,%llu\n",g_frame,g_icount,g_icount-g_last_ic,(int)vga.mode,(int)vga.draw.width,(int)vga.draw.height,(unsigned)vga.config.display_start,pal,vh,ch,g_idle-g_lastidle); g_lastidle=g_idle;
++  g_last_ic=g_icount;
++  if(vh!=g_prevhash||pal!=g_prevpal){ unsigned hdr[6]={(unsigned)g_frame,(unsigned)vn,(unsigned)vga.draw.width|((unsigned)vga.draw.height<<16),(unsigned)vga.config.display_start,(unsigned)vga.config.scan_len|((unsigned)vga.mode<<16),(unsigned)vga.config.pel_panning}; fwrite(hdr,4,6,f_vram); fwrite(vga.dac.rgb,1,768,f_vram); fwrite(vga.mem.linear,1,vn,f_vram); g_prevhash=vh;g_prevpal=pal; }
++  if(g_frame%300==0){ fflush(f_frames); fflush(f_ports); }
++  run_script();
++}
+--- src/hardware/vga_draw.cpp	2019-05-02 17:01:17.000000000 +0000
++++ ../../dosbox-0.74-3/src/hardware/vga_draw.cpp	2026-11-02 20:57:55.155153552 +0000
+@@ -752,7 +752,9 @@
+ 	vga.draw.panning = vga.config.pel_panning;
+ }
+ 
++extern void trace_frame();
+ static void VGA_VerticalTimer(Bitu /*val*/) {
++	trace_frame();
+ 	vga.draw.delay.framestart = PIC_FullIndex();
+ 	PIC_AddEvent( VGA_VerticalTimer, (float)vga.draw.delay.vtotal );
+ 	
+--- src/hardware/iohandler.cpp	2019-05-02 17:01:18.000000000 +0000
++++ ../../dosbox-0.74-3/src/hardware/iohandler.cpp	2026-11-02 20:57:55.159057355 +0000
+@@ -116,7 +116,7 @@
+ 		m_mask=mask;
+ 		m_range=range;
+ 		IO_RegisterReadHandler(port,handler,mask,range);
+-	} else E_Exit("IO_readHandler allready installed port %x",port);
++	} else E_Exit("IO_readHandler already installed port %x",port);
+ }
+ 
+ IO_ReadHandleObject::~IO_ReadHandleObject(){
+@@ -131,7 +131,7 @@
+ 		m_mask=mask;
+ 		m_range=range;
+ 		IO_RegisterWriteHandler(port,handler,mask,range);
+-	} else E_Exit("IO_writeHandler allready installed port %x",port);
++	} else E_Exit("IO_writeHandler already installed port %x",port);
+ }
+ 
+ IO_WriteHandleObject::~IO_WriteHandleObject(){
+@@ -277,7 +277,9 @@
+ #endif
+ 
+ 
++extern void trace_io(int,bool,Bitu,Bitu);
+ void IO_WriteB(Bitu port,Bitu val) {
++	trace_io(0,true,port,val);
+ 	log_io(0, true, port, val);
+ 	if (GCC_UNLIKELY(GETFLAG(VM) && (CPU_IO_Exception(port,1)))) {
+ 		LazyFlags old_lflags;
+@@ -314,6 +316,7 @@
+ }
+ 
+ void IO_WriteW(Bitu port,Bitu val) {
++	trace_io(1,true,port,val);
+ 	log_io(1, true, port, val);
+ 	if (GCC_UNLIKELY(GETFLAG(VM) && (CPU_IO_Exception(port,2)))) {
+ 		LazyFlags old_lflags;
+@@ -350,6 +353,7 @@
+ }
+ 
+ void IO_WriteD(Bitu port,Bitu val) {
++	trace_io(2,true,port,val);
+ 	log_io(2, true, port, val);
+ 	if (GCC_UNLIKELY(GETFLAG(VM) && (CPU_IO_Exception(port,4)))) {
+ 		LazyFlags old_lflags;
+--- src/cpu/core_normal.cpp	2019-05-02 17:01:16.000000000 +0000
++++ ../../dosbox-0.74-3/src/cpu/core_normal.cpp	2026-11-02 20:57:55.159331074 +0000
+@@ -136,9 +136,11 @@
+ 
+ #define EALookupTable (core.ea_table)
+ 
++extern unsigned long long g_icount; extern void trace_exec(Bit32u);
+ Bits CPU_Core_Normal_Run(void) {
+ 	while (CPU_Cycles-->0) {
+ 		LOADIP;
++		g_icount++; if(cpu.pmode&&cpu.code.big) trace_exec(reg_eip);
+ 		core.opcode_index=cpu.code.big*0x200;
+ 		core.prefixes=cpu.code.big;
+ 		core.ea_table=&EATable[cpu.code.big*256];

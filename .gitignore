@@ -1,0 +1,12 @@
+# game data and Kickstart are user-supplied, never committed
+*.EXE
+*.exe
+*.PKG
+*.pkg
+*.rom
+*.zip
+*.pdf
+*.wav
+vram.bin.gz
+ports.log
+coverage.bin
