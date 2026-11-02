@@ -181,6 +181,34 @@ class X:
         if m.startswith('rep'):
             prefix, m = m.split(' ', 1)
         key = m.replace('.', '_')
+        # xchg ah,al
+        if m == 'xchg' and [i.reg_name(o.reg) for o in i.operands if o.type == X86_OP_REG] in (['ah', 'al'], ['al', 'ah'], ['ch', 'cl'], ['cl', 'ch'], ['dh', 'dl'], ['dl', 'dh'], ['bh', 'bl'], ['bl', 'bh']):
+            r = self.r(i.reg_name(i.operands[0].reg))[0]
+            self.protected(live, lambda: self.e(f'rol.w #8,%{r}')); return self.out
+        # high-byte register as destination of a read-modify-write op: rotate the parent so it becomes a low byte
+        if m in ('inc', 'dec', 'not', 'neg', 'shl', 'shr', 'sar', 'sal', 'rol', 'ror', 'add', 'sub', 'and', 'or', 'xor', 'adc', 'sbb', 'cmp', 'test', 'mov') or m.startswith('set'):
+            d0 = i.operands[0] if i.operands else None
+            if d0 is not None and d0.type == X86_OP_REG and i.reg_name(d0.reg) in R8H:
+                hn = i.reg_name(d0.reg); parent = R8H[hn]
+                lowname = {'ah': 'al', 'ch': 'cl', 'dh': 'dl', 'bh': 'bl'}[hn]
+                other_h = any(o.type == X86_OP_REG and i.reg_name(o.reg) in R8H for o in i.operands[1:])
+                same_parent = any(o.type == X86_OP_REG and i.reg_name(o.reg) in (lowname,) for o in i.operands[1:])
+                if not other_h and not same_parent and m not in ('mov',):
+                    lowid = {'al': X86_REG_AL, 'cl': X86_REG_CL, 'dl': X86_REG_DL, 'bl': X86_REG_BL}[lowname]
+                    d0._cs_op = None if False else None
+                    d0.value.reg = lowid
+                    self.e(f'rol.w #8,%{parent}')
+                    sub = X(self.label_of, self.dispatch, self.base, self.df)
+                    body = sub.insn(i, live)
+                    self.out += body
+                    # undo rotate without disturbing the result flags
+                    if live & ALL:
+                        self.e('move.w %ccr,28(%a6)'); self.e(f'rol.w #8,%{parent}'); self.e('move.w 28(%a6),%ccr')
+                    else:
+                        self.e(f'rol.w #8,%{parent}')
+                    return self.out
+        if any(o.type == X86_OP_REG and i.reg_name(o.reg) == 'esp' for o in i.operands) and m in ('mov', 'sub', 'add', 'and', 'lea', 'xchg', 'or', 'cmp', 'sub'):
+            self.esp_insn(i, live, m); return self.out
         f = getattr(self, 'x_' + key, None)
         if f is None:
             if m.startswith('j') and m[1:] in COND or m[1:] in COND_ALIAS:
@@ -191,6 +219,58 @@ class X:
                 raise Unsupported(m)
         f(i, live, prefix)
         return self.out
+
+    def esp_insn(self, i, live, m):
+        ops = i.operands
+        d = ops[0]; sreg = ops[1] if len(ops) > 1 else None
+        dn = i.reg_name(d.reg) if d.type == X86_OP_REG else None
+        def esp_to(r):
+            self.e(f'move.l %sp,%{r}'); self.e(f'sub.l %a5,%{r}')
+        if m == 'mov':
+            if dn == 'esp':
+                # esp <- reg / mem / imm
+                if sreg.type == X86_OP_REG: 
+                    r, k = self.r(i.reg_name(sreg.reg)); self.e(f'lea (%a5,%{r}.l),%sp')
+                elif sreg.type == X86_OP_MEM:
+                    self.load_mem(i, sreg, 'd7', 4); self.e('lea (%a5,%d7.l),%sp')
+                else:
+                    self.e(f'lea ({hexs(sreg.imm)},%a5),%sp')
+                return
+            # dest not esp: source is esp
+            if d.type == X86_OP_REG:
+                r, k = self.r(dn)
+                self.protected(live, lambda: esp_to(r))
+            else:
+                def b():
+                    esp_to('d7'); self.store_mem(i, d, 'd7', 4, 'd7')
+                self.protected(live, b)
+            return
+        if dn == 'esp' and m in ('sub', 'add') and sreg.type == X86_OP_IMM:
+            v = sreg.imm if m == 'add' else -sreg.imm
+            if not (live & ALL):
+                self.e(f'lea ({hexs(v)},%sp),%sp'); return
+            esp_to('d7'); self.e(f'{m}.l #{hexs(sreg.imm)},%d7'); self.e('move.w %ccr,28(%a6)'); self.e('lea (%a5,%d7.l),%sp'); self.e('move.w 28(%a6),%ccr'); return
+        if dn == 'esp' and m == 'and' and sreg.type == X86_OP_IMM:
+            esp_to('d7'); self.e(f'and.l #{hexs(sreg.imm)},%d7'); self.e('move.w %ccr,28(%a6)'); self.e('lea (%a5,%d7.l),%sp'); self.e('move.w 28(%a6),%ccr'); return
+        if dn == 'esp' and m in ('sub', 'add', 'and', 'or') and sreg.type == X86_OP_REG:
+            r, k = self.r(i.reg_name(sreg.reg))
+            esp_to('d7'); self.e(f'{m}.l %{r},%d7'); self.e('move.w %ccr,28(%a6)'); self.e('lea (%a5,%d7.l),%sp'); self.e('move.w 28(%a6),%ccr'); return
+        if m == 'lea' and dn == 'esp':
+            mm = sreg.mem
+            base = i.reg_name(mm.base) if mm.base else None
+            if base and not mm.index and base != 'esp':
+                self.e(f'lea ({hexs(mm.disp)},%a5,%{GPR[base]}.l),%sp'); return
+            raise Unsupported('lea esp complex')
+        if m == 'cmp':
+            esp_to('d7')
+            if sreg.type == X86_OP_IMM: self.e(f'cmp.l #{hexs(sreg.imm)},%d7')
+            elif sreg.type == X86_OP_MEM:
+                self.e('movem.l %d6,32(%a6)'); self.load_mem(i, sreg, 'd6', 4); self.e('cmp.l %d6,%d7'); self.e('movem.l 32(%a6),%d6')
+            else:
+                r, k = self.r(i.reg_name(sreg.reg)); self.e(f'cmp.l %{r},%d7')
+            return
+        raise Unsupported('reg esp')
+
 
     # ------------------------------------------------------------------ moves
     def x_mov(self, i, live, pfx):
@@ -623,7 +703,6 @@ class X:
         if cnt is None: n = 1; imm = True
         elif cnt.type == X86_OP_IMM: n = cnt.imm & 31; imm = True
         else: imm = False
-        if x: self.setx_from_c()
         def emit_shift(tg):
             if imm:
                 if n == 0: return
@@ -635,13 +714,24 @@ class X:
                 if op68 in ('rol', 'ror', 'roxl', 'roxr') and size < 4:
                     pass
                 self.e(f'{op68}.{sz} %d7,{tg}')
+        if x: self.setx_from_c()
         if not mem:
             emit_shift(tgt); return
-        # memory operand
-        if size == 1:
-            self.load_mem(i, d, 'd7', 1) if False else None
-        self.load_mem(i, d, 'd6', size) if False else None
-        raise Unsupported('shift mem')
+        # memory operand: d7 = value, count in imm or cl (via d6 saved in ctx)
+        self.load_mem(i, d, 'd7', size)
+        if imm:
+            emit_shift('%d7')
+        else:
+            self.e('movem.l %d6,32(%a6)'); self.e('move.l %d1,%d6'); self.e('and.l #31,%d6'); self.e(f'{op68}.{sz} %d6,%d7'); self.e('movem.l 32(%a6),%d6')
+        def st():
+            pre, ea = self.mem(i, d)
+            for l in pre: self.e(l)
+            if size == 4:
+                for l in swap32('d7'): self.e(l)
+            elif size == 2:
+                for l in swap16('d7'): self.e(l)
+            self.e(f'move.{sz} %d7,{ea}')
+        self.protected(live, st)
 
     def x_shl(self, i, live, pfx): self.shift(i, live, 'lsl')
     def x_sal(self, i, live, pfx): self.shift(i, live, 'lsl')
@@ -710,25 +800,125 @@ class X:
         if live & CF:
             self.e('bvc 9f'); self.e('ori.b #1,%ccr'); self.e('9:')
 
+    def byte_src_to_ctx(self, i, s, signed=False):
+        """source byte operand -> ctx word at 32(%a6) (zero or sign extended)."""
+        if s.type == X86_OP_MEM:
+            self.load_mem(i, s, 'd7', 1)
+        else:
+            r, k = self.r(i.reg_name(s.reg))
+            if k == 'h': self.e(f'move.w %{r},%d7'); self.e('lsr.w #8,%d7')
+            else: self.e(f'move.b %{r},%d7')
+        if signed:
+            self.e('ext.w %d7'); self.e('move.w %d7,32(%a6)')
+        else:
+            self.e('clr.w 32(%a6)'); self.e('move.b %d7,33(%a6)')
+
     def x_mul(self, i, live, pfx):
         s = i.operands[0]
-        if s.size != 4: raise Unsupported('mul 8/16')
+        if s.size == 1:
+            self.byte_src_to_ctx(i, s)
+            self.e('moveq #0,%d7'); self.e('move.b %d0,%d7'); self.e('mulu.w 32(%a6),%d7'); self.e('move.w %d7,%d0')
+            if live & (CF | OF):
+                self.e('andi.w #0xff00,%d7'); self.e('beq 9f'); self.e('ori.b #3,%ccr'); self.e('9:')
+            return
+        if s.size == 2:
+            if s.type == X86_OP_MEM: self.load_mem(i, s, 'd7', 2); sv = '%d7'
+            else: sv = '%' + self.r(i.reg_name(s.reg))[0]
+            self.e('move.w %d0,%d6') if False else None
+            self.e('movem.l %d6,36(%a6)'); self.e('moveq #0,%d6'); self.e('move.w %d0,%d6'); self.e(f'mulu.w {sv},%d6')
+            self.e('move.w %d6,%d0'); self.e('swap %d6'); self.e('move.w %d6,%d2'); 
+            if live & (CF | OF):
+                self.e('tst.w %d2'); self.e('beq 9f'); self.e('ori.b #3,%ccr'); self.e('9:')
+            self.e('movem.l 36(%a6),%d6')
+            return
+        self.mul32(i, live)
+
+    def x_div(self, i, live, pfx):
+        s = i.operands[0]
+        if s.size == 4:
+            sv = self.src_val(i, s, 4, 'd7'); self.e(f'divu.l {sv},%d2:%d0'); return
+        if s.size == 2:
+            if s.type == X86_OP_MEM: self.load_mem(i, s, 'd7', 2); sv = 32
+            else: sv = None
+            # dividend dx:ax in d6 (saved)
+            self.e('movem.l %d6,36(%a6)')
+            if s.type == X86_OP_MEM:
+                self.e('move.w %d7,32(%a6)'); dv = '32(%a6)'
+            else:
+                dv = '%' + self.r(i.reg_name(s.reg))[0]
+            self.e('move.w %d2,%d6'); self.e('swap %d6'); self.e('move.w %d0,%d6'); self.e(f'divu.w {dv},%d6')
+            self.e('move.w %d6,%d0'); self.e('swap %d6'); self.e('move.w %d6,%d2'); self.e('movem.l 36(%a6),%d6')
+            return
+        self.byte_src_to_ctx(i, s)
+        self.e('moveq #0,%d7'); self.e('move.w %d0,%d7'); self.e('divu.w 32(%a6),%d7')
+        self.e('move.b %d7,%d0'); self.e('swap %d7'); self.e('rol.w #8,%d0'); self.e('move.b %d7,%d0'); self.e('rol.w #8,%d0')
+
+    def x_idiv(self, i, live, pfx):
+        s = i.operands[0]
+        if s.size == 4:
+            sv = self.src_val(i, s, 4, 'd7'); self.e(f'divs.l {sv},%d2:%d0'); return
+        raise Unsupported('idiv 8/16')
+
+    def mul32(self, i, live):
+        s = i.operands[0]
         sv = self.src_val(i, s, 4, 'd7')
         self.e(f'mulu.l {sv},%d2:%d0')
         if live & (CF | OF):
             self.e('tst.l %d2'); self.e('beq 9f'); self.e('ori.b #3,%ccr'); self.e('9:')
 
-    def x_div(self, i, live, pfx):
-        s = i.operands[0]
-        if s.size != 4: raise Unsupported('div 8/16')
-        sv = self.src_val(i, s, 4, 'd7')
-        self.e(f'divu.l {sv},%d2:%d0')
+    # --- misc added after the first test round
+    def x_lss(self, i, live, pfx):
+        d, m = i.operands
+        if i.reg_name(d.reg) != 'esp': raise Unsupported('lss')
+        self.load_mem(i, m, 'd7', 4)
+        self.e('lea (%a5,%d7.l),%sp')
+        # selector word at +4 ignored (ss stays flat)
 
-    def x_idiv(self, i, live, pfx):
-        s = i.operands[0]
-        if s.size != 4: raise Unsupported('idiv 8/16')
-        sv = self.src_val(i, s, 4, 'd7')
-        self.e(f'divs.l {sv},%d2:%d0')
+    def x_push16(self, i, live, pfx): pass
+
+    def x_in(self, i, live, pfx):
+        d, p = i.operands; size = d.size
+        def body():
+            self.port_arg(p)
+            self.e(f'jbsr rt_in{size * 8}')
+            r, k = self.r(i.reg_name(d.reg))
+            self.e(f'move.{SZ[size]} %d7,%{r}')
+        self.protected(live, body)
+
+    def x_out(self, i, live, pfx):
+        p, v = i.operands; size = v.size
+        def body():
+            self.port_arg(p)
+            r, k = self.r(i.reg_name(v.reg))
+            self.e(f'move.{SZ[size]} %{r},%d7')
+            self.e(f'jbsr rt_out{size * 8}')
+        self.protected(live, body)
+
+    def port_arg(self, p):
+        if p.type == X86_OP_IMM:
+            self.e(f'movea.l #{p.imm & 0xFFFF},%a0')
+        else:
+            self.e('movea.w %d2,%a0')
+
+    def x_int(self, i, live, pfx):
+        self.e(f'jbsr rt_int_{i.operands[0].imm & 0xFF:02x}')
+
+    def x_int3(self, i, live, pfx):
+        self.e('jbsr rt_int3')
+
+    def string(self, i, live, pfx, kind, size):
+        p = ''
+        if pfx:
+            p = 'rep_' if pfx in ('rep', 'repne') and kind != 'scas' else (pfx + '_')
+        nm = f'rt_{p}{kind}{"bwd"[{1: 0, 2: 1, 4: 2}[size]]}'
+        self.e(f'jbsr {nm}')
+
+    def x_outsb(self, i, live, pfx): self.string(i, live, pfx, 'outs', 1)
+    def x_outsw(self, i, live, pfx): self.string(i, live, pfx, 'outs', 2)
+    def x_outsd(self, i, live, pfx): self.string(i, live, pfx, 'outs', 4)
+    def x_cmpsb(self, i, live, pfx): self.string(i, live, pfx, 'cmps', 1)
+    def x_cmpsw(self, i, live, pfx): self.string(i, live, pfx, 'cmps', 2)
+    def x_cmpsd(self, i, live, pfx): self.string(i, live, pfx, 'cmps', 4)
 
     # ------------------------------------------------------------------ stack
     def x_push(self, i, live, pfx):
@@ -897,9 +1087,6 @@ class X:
     def x_jecxz(self, i, live, pfx):
         self.e('tst.l %d1'); self.e(f'jbeq {self.label_of(i.operands[0].imm)}')
 
-    # ------------------------------------------------------------------ string ops
-    def seg_a(self):
-        pass
 
     def x_stosb(self, i, live, pfx): self.string(i, live, pfx, 'stos', 1)
     def x_stosw(self, i, live, pfx): self.string(i, live, pfx, 'stos', 2)
@@ -914,6 +1101,3 @@ class X:
     def x_scasw(self, i, live, pfx): self.string(i, live, pfx, 'scas', 2)
     def x_scasd(self, i, live, pfx): self.string(i, live, pfx, 'scas', 4)
 
-    def string(self, i, live, pfx, kind, size):
-        # delegated to a runtime helper family when a repeat prefix is present; simple forms inline.
-        raise Unsupported('string ops handled by xl_string')

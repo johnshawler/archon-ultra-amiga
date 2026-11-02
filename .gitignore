@@ -10,3 +10,5 @@
 vram.bin.gz
 ports.log
 coverage.bin
+__pycache__/
+*.pyc

@@ -28,6 +28,7 @@ class LE:
                 buf[p * self.pagesize:(p + 1) * self.pagesize] = d[src:src + self.pagesize] if src < len(d) else b''
             self.mem[n + 1] = buf[:ob['size']] if ob['size'] <= len(buf) else buf
         self.fixups = self._parse_fixups()
+        self.apply_fixups()
 
     def _parse_fixups(self):
         d, o = self.d, self.o
@@ -56,6 +57,22 @@ class LE:
                 if fl & 0x04: p += 4 if fl & 0x20 else 2   # additive value
                 for s in srcs: out.append((pg, s, st & 0xF, tobj, toff))
         return out
+
+    def apply_fixups(self):
+        """Relocate in place to the link-time object bases (x86 linear address == window offset)."""
+        n = 0
+        for pg, s_, kind, tobj, toff in self.fixups:
+            for k, ob in enumerate(self.objs):
+                if ob['pmi'] - 1 <= pg < ob['pmi'] - 1 + ob['npages']:
+                    off = (pg - (ob['pmi'] - 1)) * 4096 + s_
+                    m = self.mem[k + 1]
+                    tb = self.objs[tobj - 1]['base']
+                    if kind in (7, 6) and 0 <= off and off + 4 <= len(m):
+                        struct.pack_into('<I', m, off, (tb + toff) & 0xFFFFFFFF); n += 1
+                    elif kind == 5 and off + 2 <= len(m):
+                        struct.pack_into('<H', m, off, (tb + toff) & 0xFFFF); n += 1
+                    break
+        self.nreloc = n
 
 if __name__ == '__main__':
     import sys, collections
