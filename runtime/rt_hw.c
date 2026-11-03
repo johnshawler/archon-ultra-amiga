@@ -224,7 +224,11 @@ u32 vga_vretrace_state(void) {
 #endif
     u32 line = t / line_us, in_line = t % line_us;
     u32 r = 0;
+#ifndef HOSTED
+    if (line >= 412 && line < 430) r |= 8;            /* wider than the real 2 lines: tolerant of a slow polling loop (the display itself is flipped independently) */
+#else
     if (line >= 412 && line < 414) r |= 8;
+#endif
     if (r || in_line >= 26) r |= 1;
     return r;
 }
