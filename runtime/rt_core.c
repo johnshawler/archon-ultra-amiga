@@ -356,21 +356,25 @@ void rt_mouse_set(u32 x, u32 y, u32 b) { mouse_x = x; mouse_y = y; mouse_b = b; 
 #include <stdio.h>
 static FILE *ftr;
 #define trn rt_trn
-static struct { long idx; int vec; } ev[60000]; static int nev, evp; static int replay_loaded;
+static struct { long idx; int vec; int untraced; } ev[60000]; static int ut_active; static u32 ut_addr; static long ut_trn; static int nev, evp; static int replay_loaded;
 extern void hw_replay_time(u32 us);
 u32 rt_c_trace(u32 addr, struct regs *r) {
     if (!replay_loaded) {
         replay_loaded = 1; FILE *f = fopen("irq_sched.txt", "r");
-        if (f) { char line[128]; while (fgets(line, sizeof line, f) && nev < 60000) { long i; int v, t; if (line[0] != '#' && sscanf(line, "%ld %d %d", &i, &v, &t) == 3) { ev[nev].idx = i; ev[nev].vec = v; nev++; } } fclose(f); rt_replay = 1; }
+        if (f) { static char L[300000][40]; int nl = 0; while (nl < 300000 && fgets(L[nl], 40, f)) nl++;
+            for (int k = 0; k < nl && nev < 60000; k++) { long i; int v, t; if (L[k][0] != '#' && sscanf(L[k], "%ld %d %d", &i, &v, &t) == 3) {
+                long a1 = -1, a2 = -1; if (k > 0) sscanf(L[k - 1], "# sw %ld", &a1); if (k + 1 < nl) sscanf(L[k + 1], "# sw %ld", &a2);
+                ev[nev].idx = i; ev[nev].vec = v; ev[nev].untraced = (a1 == i && a2 == i); nev++; } } fclose(f); rt_replay = 1; }
         ftr = fopen("iteip_ours.bin", "wb"); if (rt_replay) hw_use_exact();
     }
+    if (ut_active && addr == ut_addr) { ut_active = 0; trn = ut_trn; }       /* an untraced (DOSBox-internal) handler run has returned: its instructions are not counted */
     while (evp < nev && ev[evp].idx == trn) {
-        int vec = ev[evp++].vec;
+        int vec = ev[evp].vec, unt = ev[evp].untraced; evp++;
         if (vec == 8 && !vec_pm[8]) { st32(0x46C, ld32(0x46C) + 1); continue; }
         if (vec_pm[vec]) {
             if (vec == 0x70) { extern void hw_rtc_flag(void); hw_rtc_flag(); }
             u32 off = vec_pm[vec] - XL_BASE; u32 t = xl_tab[off];
-            if (t) { u32 ef = rt_mk_eflags(CTX->ccr_stub); CTX->tmp[0] = (ef << 24) | ((ef & 0xFF00) << 8) | ((ef >> 8) & 0xFF00) | (ef >> 24); return t; }
+            if (t) { if (unt && !ut_active) { ut_active = 1; ut_addr = addr; ut_trn = trn; } u32 ef = rt_mk_eflags(CTX->ccr_stub); CTX->tmp[0] = (ef << 24) | ((ef & 0xFF00) << 8) | ((ef >> 8) & 0xFF00) | (ef >> 24); return t; }
         }
     }
     { static long dumpidx = -2; if (dumpidx == -2) { const char *e = getenv("DUMPIDX"); dumpidx = e ? atol(e) : -1; }
