@@ -458,8 +458,24 @@ void plat_audio_push(const u8 *d, u32 n, u32 rate, int is16, int stereo, int sig
 void plat_vsync(u32 frame) { (void)frame; }
 
 /* ------------------------------------------------------------------------------------------- polling hook called by the runtime */
+#ifdef TESTKEYS
+/* test-only scripted input (game time in ms since start, PC scancode): D = down, space = fire (Light keyboard map) */
+static const struct { u32 ms; u8 sc; } tk[] = {
+    {70000,0x20},{70200,0xA0},{70600,0x20},{70800,0xA0},{71200,0x20},{71400,0xA0},{71800,0x20},{72000,0xA0},
+    {72400,0x20},{72600,0xA0},{73000,0x20},{73200,0xA0},{73600,0x39},{73800,0xB9},
+};
+static unsigned tk_i;
+static void test_keys(void)
+{
+    u32 ms = plat_time_us() / 1000;
+    while (tk_i < sizeof tk / sizeof tk[0] && ms >= tk[tk_i].ms) { hw_key(tk[tk_i].sc); tk_i++; }
+}
+#endif
 void plat_poll(void)
 {
+#ifdef TESTKEYS
+    test_keys();
+#endif
 #ifdef DEBUGBAR
     polls++;
 #endif

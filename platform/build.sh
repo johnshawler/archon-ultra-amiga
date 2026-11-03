@@ -25,7 +25,7 @@ rm -f $OUT/*.o
 for f in obj1.s objdata.s; do $CC $DS -c -x assembler $OUT/$f -o $OUT/${f%.s}.o; done
 $CC $DS -c -x assembler $R/runtime/rt_asm.s -o $OUT/rt_asm.o
 for f in rt_core rt_vga rt_hw; do $CC -c $R/runtime/$f.c -o $OUT/$f.o; done
-$CC ${DEBUGBAR:+-DDEBUGBAR} ${DBGSTOP:+-DDBG_STOP=$DBGSTOP} -c $P/platform.c -o $OUT/platform.o
+$CC ${DEBUGBAR:+-DDEBUGBAR} ${TESTKEYS:+-DTESTKEYS} ${DBGSTOP:+-DDBG_STOP=$DBGSTOP} -c $P/platform.c -o $OUT/platform.o
 $CC -c $P/libc.c -o $OUT/libc.o
 for f in crt0 isr c2p; do $CC -c -x assembler $P/$f.s -o $OUT/$f.o; done
 m68k-linux-gnu-ld -z noexecstack --no-warn-rwx-segments -q -T $P/link.ld -o $OUT/archon.elf $OUT/crt0.o $OUT/isr.o $OUT/c2p.o $OUT/platform.o $OUT/rt_core.o $OUT/rt_vga.o $OUT/rt_hw.o $OUT/rt_asm.o $OUT/obj1.o $OUT/objdata.o $OUT/libc.o $(m68k-linux-gnu-gcc -m68030 -msoft-float -print-libgcc-file-name)
