@@ -305,8 +305,23 @@ static int int10(struct regs *r) {
     if (ah == 0x12 || ah == 0x11 || ah == 0x10 || ah == 0x01 || ah == 0x02 || ah == 0x05) return 0;
     plat_log("rt: int10 ax=%04x unhandled\n", r->eax & 0xFFFF); return 0;
 }
+#ifdef HOSTED
+extern long rt_replay;
+static struct { u32 axin, ax, bx, cx, dx; } m33[20000]; static int nm33, pm33, m33_loaded;
+#endif
 static int int33(struct regs *r) {
     u32 ax = r->eax & 0xFFFF;
+#ifdef HOSTED
+    if (rt_replay) {            /* replay the reference emulator's mouse driver results, in call order */
+        if (!m33_loaded) { m33_loaded = 1; FILE *f = fopen("int33.log", "r"); if (f) { long i; unsigned a, b, c, d, e, g, h, k;
+            while (nm33 < 20000 && fscanf(f, "%ld %x %x %x %x %x %x %x %x", &i, &a, &b, &c, &d, &e, &g, &h, &k) == 9) { m33[nm33].axin = a; m33[nm33].ax = e; m33[nm33].bx = g; m33[nm33].cx = h; m33[nm33].dx = k; nm33++; } fclose(f); } }
+        if (pm33 < nm33) {
+            if (m33[pm33].axin != ax) plat_log("replay: int33 call %d ax=%04x, reference %04x\n", pm33, ax, m33[pm33].axin);
+            r->eax = (r->eax & ~0xFFFFu) | m33[pm33].ax; r->ebx = (r->ebx & ~0xFFFFu) | m33[pm33].bx; r->ecx = (r->ecx & ~0xFFFFu) | m33[pm33].cx; r->edx = (r->edx & ~0xFFFFu) | m33[pm33].dx;
+            pm33++; return 0;
+        }
+    }
+#endif
     switch (ax) {
     case 0: r->eax = 0xFFFF; r->ebx = 2; return 0;
     case 1: case 2: case 4: case 7: case 8: case 0x0A: case 0x0F: case 0x1D: return 0;
