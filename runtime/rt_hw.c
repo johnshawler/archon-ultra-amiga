@@ -3,10 +3,15 @@
 #include "rt.h"
 
 static u32 now;                  /* us */
+#ifdef HOSTED
+#define HOSTED_START_D p->start_d = now_d;
 static double now_d;             /* exact time in us (replay builds) */
 void hw_set_exact(double us) { now_d = us; }
 static int exact_mode;
 void hw_use_exact(void) { exact_mode = 1; }
+#else
+#define HOSTED_START_D
+#endif
 /* ---- PIC */
 static u8 irr[2], isr[2], imr[2] = {0xB8, 0xFF}, vbase[2] = {8, 0x70};
 static u8 icw_state[2];
@@ -27,6 +32,9 @@ static int pic_next(void) {            /* returns vector or -1 */
     }
     return -1;
 }
+u32 hw_dbg1(void) { return (irr[0] << 24) | (irr[1] << 16) | (isr[0] << 8) | isr[1]; }
+static u8 cmos_idx, cmos[128];
+u32 hw_dbg2(void) { return (imr[0] << 24) | (imr[1] << 16) | (cmos[0x0B] << 8) | cmos[0x0A]; }
 int hw_irq_pending(void) { return pic_next() >= 0; }
 int hw_irq_ack(void) {
     int irq = pic_next(); if (irq < 0) return -1;
@@ -53,10 +61,15 @@ static void pic_out(int c, u32 port, u8 v) {
 }
 
 /* ---- PIT */
-struct pit { double start_d; u32 reload; u32 start_us; u8 mode, rw, latched, lsb_next, wr_state; u16 latch_val, wr_lo; u8 gate; u32 phase_us; double frac; };
+struct pit {
+#ifdef HOSTED
+ double start_d;
+#endif
+ u32 reload; u32 start_us; u8 mode, rw, latched, lsb_next, wr_state; u16 latch_val, wr_lo; u8 gate; u32 phase_us; };
 static struct pit pit[3];
 static u8 spk = 0;
 #define PIT_HZ 1193182.0
+#ifdef HOSTED
 static u32 pit_count(int ch) {
     struct pit *p = &pit[ch]; u32 rl = p->reload ? p->reload : 65536;
     double ticks = (exact_mode ? (now_d - (double)p->start_d) : (double)(now - p->start_us)) * (PIT_HZ / 1e6);
@@ -67,6 +80,17 @@ static u32 pit_count(int ch) {
     u32 t = (u32)ticks % rl; u32 v = rl - t;
     return v & 0xFFFF;
 }
+#else
+static u32 pit_count(int ch) {
+    struct pit *p = &pit[ch]; u32 rl = p->reload ? p->reload : 65536;
+    u64 ticks = ((u64)(u32)(now - p->start_us) * 1193182u + 999999u) / 1000000u;      /* integer version of the same maths */
+    if (p->mode == 0 || p->mode == 4) {
+        if (ticks > rl) { u32 t = (u32)((ticks - rl) % 65536u); return (0xffffu - t) & 0xFFFF; }
+        return (u32)(rl - (u32)ticks) & 0xFFFF;
+    }
+    return (rl - (u32)(ticks % rl)) & 0xFFFF;
+}
+#endif
 static void pit_out(u32 port, u8 v) {
     if (port == 0x43) {
         int ch = v >> 6;
@@ -75,9 +99,9 @@ static void pit_out(u32 port, u8 v) {
         pit[ch].rw = (v >> 4) & 3; pit[ch].mode = (v >> 1) & 7; pit[ch].wr_state = 0; return;
     }
     int ch = port - 0x40; struct pit *p = &pit[ch];
-    if (p->rw == 1) { p->reload = v; p->start_us = now; p->start_d = now_d; }
-    else if (p->rw == 2) { p->reload = v << 8; p->start_us = now; p->start_d = now_d; }
-    else { if (!p->wr_state) { p->wr_lo = v; p->wr_state = 1; } else { p->reload = (v << 8) | p->wr_lo; p->wr_state = 0; p->start_us = now; p->start_d = now_d; if (ch == 0) p->phase_us = now; } }
+    if (p->rw == 1) { p->reload = v; p->start_us = now; HOSTED_START_D }
+    else if (p->rw == 2) { p->reload = v << 8; p->start_us = now; HOSTED_START_D }
+    else { if (!p->wr_state) { p->wr_lo = v; p->wr_state = 1; } else { p->reload = (v << 8) | p->wr_lo; p->wr_state = 0; p->start_us = now; HOSTED_START_D if (ch == 0) p->phase_us = now; } }
 }
 static u32 pit_in(u32 port) {
     int ch = port - 0x40; struct pit *p = &pit[ch];
@@ -87,20 +111,19 @@ static u32 pit_in(u32 port) {
     if (p->lsb_next || !p->latched) { u32 r = (p->lsb_next ? v & 0xFF : v & 0xFF); p->lsb_next = 0; if (!p->latched) { p->lsb_next = 2; } return r; }
     p->latched = 0; return v >> 8;
 }
-static u32 pit0_next_irq_us;
 static void pit_advance(void) {
     struct pit *p = &pit[0]; u32 rl = p->reload ? p->reload : 65536;
-    double period = rl * (1e6 / PIT_HZ);
     if (!p->start_us && !p->reload) return;
-    double due = p->frac;
-    while (1) {
-        double next = (double)p->phase_us + period;
-        if ((double)now >= next) { p->phase_us = (u32)next; irq_raise(0); } else break;
+    u32 period = (u32)(((u64)rl * 1000000u) / 1193182u); if (!period) period = 1;
+    if (now - p->phase_us >= period) {
+        irq_raise(0);
+        p->phase_us += period;
+        if (now - p->phase_us >= 4 * period) p->phase_us = now;      /* running slow: do not queue a storm */
     }
 }
 
 /* ---- CMOS RTC */
-static u8 cmos_idx, cmos[128];
+
 static u32 rtc_last_us, rtc_period_us;
 static void rtc_advance(void) {
     if (!(cmos[0x0B] & 0x40)) { rtc_last_us = now; return; }

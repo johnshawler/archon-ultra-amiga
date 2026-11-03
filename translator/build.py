@@ -221,9 +221,17 @@ def main(exe, seeds_path, outs, stats=True):
     open(outs, 'w').write(txt)
     open(outs + '.starts', 'w').write('\n'.join('%x' % a for a in starts) + '\n')
     ent = BASE + le.eip
-    tab = ['\t.data', '\t.even', '\t.globl xl_start_list', 'xl_start_list:']
-    for a in starts: tab.append(f'\t.long 0x{a - BASE:x}, {label(a)}')
-    tab += ['\t.long -1, 0', '\t.globl xl_entry', f'xl_entry:\t.long {label(ent)}', '\t.globl xl_nstarts', f'xl_nstarts:\t.long {len(starts)}']
+    first = starts[0]
+    # compact dispatch data: bitmap of instruction starts (one bit per code byte) + 16-bit native deltas between consecutive starts
+    size = len(le.mem[1]); bm = bytearray((size + 7) // 8)
+    for a in starts: bm[(a - BASE) >> 3] |= 1 << ((a - BASE) & 7)
+    tab = ['\t.data', '\t.even', '\t.globl xl_bits', 'xl_bits:']
+    for k in range(0, len(bm), 32): tab.append('\t.byte ' + ','.join(str(v) for v in bm[k:k + 32]))
+    tab += ['\t.even', '\t.globl xl_deltas', 'xl_deltas:']
+    for k in range(1, len(starts), 8):
+        tab.append('\t.word ' + ','.join(f'{label(starts[j])}-{label(starts[j - 1])}' for j in range(k, min(k + 8, len(starts)))))
+    tab += ['\t.even', '\t.globl xl_entry', f'xl_entry:\t.long {label(ent)}', '\t.globl xl_first', f'xl_first:\t.long {label(first)}',
+            '\t.globl xl_nstarts', f'xl_nstarts:\t.long {len(starts)}', '\t.globl xl_codesize', f'xl_codesize:\t.long {size}']
     open(outs, 'a').write('\n'.join(tab) + '\n')
     if stats:
         print('instructions', len(ins), 'trusted', len(trusted), 'translated ok', n_ok, 'branch targets missing', len(missing))

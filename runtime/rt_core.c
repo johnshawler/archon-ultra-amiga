@@ -2,12 +2,27 @@
 #include "rt.h"
 #include "layout.h"
 #include "bda.h"
+#ifdef HOSTED
 #include <stdio.h>
 #include <stdlib.h>
-#include <stdlib.h>
+#endif
 
-u8 *WIN; struct ctx *CTX; long rt_replay; long rt_trn; double rt_cycles; extern void hw_set_exact(double us); extern void hw_use_exact(void);
-extern u32 xl_tab[];
+u8 *WIN; struct ctx *CTX; long rt_replay; long rt_trn;
+#ifdef HOSTED
+double rt_cycles; extern void hw_set_exact(double us); extern void hw_use_exact(void);
+#endif
+u32 xl_tab[0x3d100];
+extern const u8 xl_bits[]; extern const u16 xl_deltas[]; extern const u32 xl_first, xl_nstarts, xl_codesize;
+extern void rt_dispatch_miss(void);
+/* fill the x86-offset -> native-address dispatch table from the compact start/delta data */
+void rt_build_xl_tab(void) {
+    for (u32 i = 0; i < sizeof xl_tab / 4; i++) xl_tab[i] = (u32)rt_dispatch_miss;
+    u32 native = xl_first, k = 0, n = 0;
+    for (u32 off = 0; off < xl_codesize && n < xl_nstarts; off++) {
+        if (xl_bits[off >> 3] & (1 << (off & 7))) { if (n) native += xl_deltas[n - 1]; xl_tab[off] = native; n++; }
+    }
+    (void)k;
+}
 #define HEAP_BASE 0x1e0000u
 #define DOS_BASE 0x8eb0u
 #define DOS_END 0xA0000u
@@ -18,7 +33,11 @@ static u32 a_ptr = 0x220, a_end = 0x861, b_ptr = 0x8eb, b_end = 0x9fff;
 u32 rt_heap_end = 0xFFF000u, rt_heap_reserve = 0;      /* harness mimics DOSBox's 16 MB; the Amiga build lowers these */
 #define HEAP_END rt_heap_end
 static u32 heap_ptr = HEAP_BASE;
+#ifdef HOSTED
 #define POLL_N 64
+#else
+#define POLL_N 128
+#endif
 #define QUANT_US 16
 static u32 vtime; static int getenv_dbg = 1;
 
@@ -39,8 +58,9 @@ static u32 sel_base(u32 sel) {
 static u32 new_sel(u32 base) { ldt_base[ldt_n] = base; return 0x1d0 + 8 * ldt_n++; }
 
 static u32 halloc(u32 bytes) {
+    if (bytes > HEAP_END) return 0;
     bytes = (bytes + 15) & ~15u;
-    if (heap_ptr + bytes > HEAP_END) return 0;
+    if (bytes > HEAP_END - heap_ptr) return 0;
     u32 p = heap_ptr; heap_ptr += bytes;
     for (u32 i = 0; i < bytes; i += 4096) { }
     return p;
@@ -71,6 +91,7 @@ void rt_c_unimpl(u32 where) { plat_log("rt: UNIMPLEMENTED instruction at x86 %x 
 void rt_c_badtarget(u32 off, u32 ret) { plat_log("rt: indirect jump/call to unknown x86 target %x (native return %x)\n", off + XL_BASE, ret); plat_exit(4); }
 
 /* ---- ports */
+#ifdef HOSTED
 static int getenv_dbg2(void) { static int v = -1; if (v < 0) v = getenv("PORTLOG") != 0; return v; }
 static struct { long idx; u16 port; u8 val; } *prd; static long npr, prp; static int pr_loaded;
 static void pr_load(void) {
@@ -79,23 +100,30 @@ static void pr_load(void) {
     while (fgets(line, sizeof line, f) && npr < cap) { long i; unsigned p, v; if (sscanf(line, "%ld %x %x", &i, &p, &v) == 3) { prd[npr].idx = i; prd[npr].port = p; prd[npr].val = v; npr++; } }
     fclose(f);
 }
+#endif
 u32 rt_c_in(u32 port, int size) {
+#ifdef HOSTED
     if (rt_replay) {
         if (!pr_loaded) pr_load();
         while (prp < npr && prd[prp].idx < rt_trn) prp++;
         if (prp < npr && prd[prp].idx == rt_trn && prd[prp].port == port) { u32 v = prd[prp++].val; rt_cycles += 30; hw_set_exact(rt_cycles / 30.0); return v; }
+        rt_cycles += 30; hw_set_exact(rt_cycles / 30.0);
     }
-    if (rt_replay) { rt_cycles += 30; hw_set_exact(rt_cycles / 30.0); }
+#endif
     int h; u32 v = vga_port_in(port, size, &h); if (h) return v;
     v = hw_port_in(port, size, &h);
+#ifdef HOSTED
     if (rt_replay && (port == 0x42 || port == 0x201 || port == 0x40) && getenv_dbg2()) plat_log("PR %ld %x %x\n", rt_trn, port, v & 0xFF);
+#endif
     if (h) return v;
     { static u8 seen[65536]; if (!seen[port & 0xFFFF]++) plat_log("rt: in %x (size %d) unhandled\n", port, size); }
     return 0xFFFFFFFFu;
 }
 void rt_c_out(u32 port, u32 val, int size) {
     val &= size == 1 ? 0xFF : size == 2 ? 0xFFFF : 0xFFFFFFFFu;
+#ifdef HOSTED
     if (rt_replay) { rt_cycles += 22; hw_set_exact(rt_cycles / 30.0); }
+#endif
     if (vga_port_out(port, val, size)) return;
     if (hw_port_out(port, val, size)) return;
     { static u8 seen[65536]; if (!seen[port & 0xFFFF]++) plat_log("rt: out %x,%x (size %d) unhandled\n", port, val, size); }
@@ -115,7 +143,9 @@ static u32 flags_sub(u32 a, u32 b, int sz) {
 u32 rt_c_str(int op, struct regs *r) {
     int s = op % 3, kind = (op / 3) % 6, pfx = op / 18; int sz = 1 << s;
     int rep = pfx != 0; int step = CTX->df ? -sz : sz;
+#ifdef HOSTED
     if (getenv("STRDBG") && rep && r->ecx >= 0x20 && r->ecx < 0x80) plat_log("STR op=%d esi=%x edi=%x ecx=%x df=%d dsb=%x esb=%x src0=%08x\n", op, r->esi, r->edi, r->ecx, CTX->df, CTX->ds_base, CTX->es_base, ld32(CTX->ds_base + r->esi));
+#endif
     u32 flags = *(u16 *)((char *)r + 40) & 0xF; int cmpl = (kind == 3 || kind == 4); (void)cmpl;
     u32 dsb = CTX->ds_base, esb = CTX->es_base;
     for (;;) {
@@ -141,19 +171,29 @@ u32 vga_frame_count;
 extern void hw_advance(u32);
 extern void plat_vsync(u32 frame);
 extern long rt_replay;
+#ifndef HOSTED
+extern void plat_poll(void);
+#endif
 void rt_c_poll_time(void) {
     static u32 last_frame_t;
     if (rt_replay) return;
+#ifndef HOSTED
+    plat_poll();                                   /* input, display, audio; the clock below is real time */
+    hw_advance(plat_time_us());
+#else
     vtime += QUANT_US; hw_advance(vtime);
     if (vtime - last_frame_t >= 14268) { last_frame_t += 14268; vga_frame_count++; plat_vsync(vga_frame_count); }
+#endif
 }
+u32 rt_dbg_irq, rt_dbg_a, rt_dbg_b, rt_dbg_n5;
 u32 rt_c_poll(struct regs *r) {
+    rt_dbg_irq = HEAP_END;
     if (rt_replay) { CTX->poll = 1000000; return 0; }
     CTX->poll = POLL_N;
     rt_c_poll_time();
     if (CTX->iflag && hw_irq_pending()) {
         { u32 ef = rt_mk_eflags(CTX->ccr_stub); CTX->tmp[0] = (ef << 24) | ((ef & 0xFF00) << 8) | ((ef >> 8) & 0xFF00) | (ef >> 24); }
-        int vec = hw_irq_ack();
+        int vec = hw_irq_ack(); rt_dbg_n5 = (rt_dbg_n5 & 0xFFFF0000u) + 0x10000u + (vec & 0xFFFF);
         if (vec >= 0 && vec_pm[vec]) {
             u32 off = vec_pm[vec] - XL_BASE; if (off < 0x3d000 + 0x1000) { u32 t = xl_tab[off]; if (t) return t; }
             plat_log("rt: IRQ vector %x handler %x not translated\n", vec, vec_pm[vec]);
@@ -174,7 +214,7 @@ static int int21(struct regs *r) {
     case 0x30: r->eax = 5; r->ebx = 0x5048ff00u; return 0;
     case 0x25: vec_pm[al] = r->edx; plat_log("rt: set vector %02x = %x (int21)\n", al, r->edx); return 0;
     case 0x35: r->ebx = vec_pm[al] ? vec_pm[al] : 0xD09; return 0;
-    case 0x3D: { static int nth; nth++; if (nth == 4) { FILE *f = fopen("obj3_ours.bin", "wb"); fwrite(WIN + OBJ3_BASE, 1, 0x33dd0, f); fclose(f); }
+    case 0x3D: {
         for (int i = 5; i < 32; i++) if (!files[i].name[0]) {
             long h = plat_file_open(winstr(r->edx)); if (h < 0) { set_cf(1, r, 2); return 1; }
             files[i].h = h; files[i].name[0] = 1; r->eax = i; return 0; }
@@ -240,8 +280,8 @@ static int int31(struct regs *r) {
         CTX->ds_base = save_ds; (void)es;
         st32(st, rr.edi); st32(st + 4, rr.esi); st32(st + 8, rr.ebp); st32(st + 16, rr.ebx); st32(st + 20, rr.edx); st32(st + 24, rr.ecx); st32(st + 28, rr.eax);
         st16(st + 0x20, c ? 1 : 0); return 0; }
-    case 0x0500: { u32 st = r->edi + CTX->es_base; u32 avail = ((HEAP_END - heap_ptr - rt_heap_reserve) & ~0xFFFu) + 0x1000; st32(st, avail); for (int k = 4; k < 0x30; k += 4) st32(st + k, 0xFFFFFFFFu); st32(st + 0x1c, avail >> 12); return 0; }
-    case 0x0501: { u32 sz = ((r->ebx & 0xFFFF) << 16) | (r->ecx & 0xFFFF); u32 p = sz ? halloc(sz) : 0; plat_log("rt: dpmi alloc %x -> %x\n", sz, p);
+    case 0x0500: { u32 st = r->edi + CTX->es_base; u32 room = (HEAP_END > heap_ptr + rt_heap_reserve) ? HEAP_END - heap_ptr - rt_heap_reserve : 0; u32 avail = (room & ~0xFFFu) + 0x1000; st32(st, avail); for (int k = 4; k < 0x30; k += 4) st32(st + k, 0xFFFFFFFFu); st32(st + 0x1c, avail >> 12); return 0; }
+    case 0x0501: { u32 sz = ((r->ebx & 0xFFFF) << 16) | (r->ecx & 0xFFFF); u32 p = sz ? halloc(sz) : 0; rt_dbg_a = sz; rt_dbg_b = heap_ptr; rt_dbg_n5++; plat_log("rt: dpmi alloc %x -> %x\n", sz, p);
         if (!p) { set_cf(1, r, 0x8012); return 1; }
         static u32 hn; r->ebx = (r->ebx & 0xFFFF0000u) | (p >> 16); r->ecx = (r->ecx & 0xFFFF0000u) | (p & 0xFFFF); r->esi = (r->esi & 0xFFFF0000u) | 0x4001; r->edi = (r->edi & 0xFFFF0000u) | (0x59c7 + 0x20 * hn++); return 0; }
     case 0x0502: return 0;
@@ -284,8 +324,9 @@ static int int1a(struct regs *r) {
     return 0;
 }
 
+u32 rt_dbg_last, rt_dbg_nint, rt_dbg_hist[32];
 int rt_c_int(u32 vec, struct regs *r) {
-    int c;
+    int c; rt_dbg_last = (vec << 8) | ((r->eax >> 8) & 0xFF); rt_dbg_hist[rt_dbg_nint & 31] = (vec << 16) | (r->eax & 0xFFFF); rt_dbg_nint++;
     switch (vec) {
     case 0x21: c = int21(r); break;
     case 0x31: c = int31(r); break;
@@ -310,6 +351,7 @@ void rt_init(u8 *win, struct ctx *ctx) {
 }
 void rt_mouse_set(u32 x, u32 y, u32 b) { mouse_x = x; mouse_y = y; mouse_b = b; }
 
+#ifdef HOSTED
 #include <stdio.h>
 static FILE *ftr;
 #define trn rt_trn
@@ -343,3 +385,5 @@ u32 rt_c_trace(u32 addr, struct regs *r) {
     if (trn == 30000000) { fflush(ftr); plat_exit(0); }
     return 0;
 }
+
+#endif

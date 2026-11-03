@@ -264,7 +264,7 @@ rt_iretd:				| stack: [eip][cs][eflags] (all LE); restores CF/ZF/SF/OF and IF fr
 	swap %d7
 	ror.w #8,%d7
 	sub.l #XL_BASE,%d7
-	lea xl_tab,%a0
+	lea (xl_tab,%pc),%a0
 	move.l (%a0,%d7.l*4),%a1
 	addq.l #4,%sp
 	moveq #0,%d7
@@ -287,6 +287,7 @@ rt_iretd:				| stack: [eip][cs][eflags] (all LE); restores CF/ZF/SF/OF and IF fr
 	move.w %d7,%ccr
 	jmp (%a1)
 
+	.ifdef HOSTED
 	.globl rt_trace
 rt_trace:				| debug/replay build: log eip, optionally inject a recorded interrupt before the instruction
 	move.w %ccr,{CTXREGS + 40}(%a6)
@@ -319,5 +320,6 @@ rt_trace_isr_return:
 2:	movem.l {CTXREGS}(%a6),%d0-%d6
 	move.w {CTXREGS + 40}(%a6),%ccr
 	jmp 4(%a2)
+	.endif
 ''')
-open('runtime/rt_asm.s', 'w').write(''.join(OUT))
+open(__import__('os').path.join(__import__('os').path.dirname(__import__('os').path.abspath(__file__)), 'rt_asm.s'), 'w').write(''.join(OUT))

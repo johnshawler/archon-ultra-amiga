@@ -13,9 +13,8 @@
 
 static u8 win[0x1000000 + 0x2000] __attribute__((aligned(4096)));
 static struct ctx ctx;
-u32 xl_tab[0x3d100];
-extern u32 xl_start_list[], xl_entry;
-extern void rt_dispatch_miss(void);
+extern u32 xl_entry;
+extern void rt_build_xl_tab(void); extern u32 xl_tab[];
 static const char *dir = "."; static FILE *fdump, *faudio; static u32 max_frames = 600; static u32 prev_hash;
 
 void plat_log(const char *fmt, ...) { va_list ap; va_start(ap, fmt); vfprintf(stderr, fmt, ap); va_end(ap); }
@@ -59,8 +58,7 @@ int main(int argc, char **argv) {
         if (fd < 0) { plat_log("harness: missing %s\n", p); return 1; }
         long n = read(fd, win + bases[i], 0x40000); close(fd); (void)n;
     }
-    for (u32 i = 0; i < sizeof xl_tab / 4; i++) xl_tab[i] = (u32)rt_dispatch_miss;
-    for (u32 *p = xl_start_list; p[0] != 0xFFFFFFFFu; p += 2) xl_tab[p[0]] = p[1];
+    rt_build_xl_tab();
     { extern void rt_isr_return(void); extern void rt_trace_isr_return(void); xl_tab[XL_SENTINEL_OFF] = (u32)rt_isr_return; xl_tab[XL_SENTINEL_TRACE_OFF] = (u32)rt_trace_isr_return; }
     rt_init(win, &ctx);
     rt_enter(win, &ctx, OBJ3_ESP_TOP, (void *)xl_entry);

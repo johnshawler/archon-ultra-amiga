@@ -66,6 +66,7 @@ void plat_vsync(u32 frame);
 void rt_init(u8 *win, struct ctx *ctx);
 void rt_enter(u8 *win, struct ctx *ctx, u32 esp, void *entry);
 void hw_key(u8 sc);
+void rt_mouse_set(u32 x, u32 y, u32 b);
 void vga_get_display(u32 *start, u32 *pitch, int *chain4);
 u32 vga_pan(void);
 u32 hw_now(void);
@@ -84,6 +85,7 @@ int  vga_in_window(u32 a);
 u32  vga_port_in(u32 port, int size, int *handled);
 int  vga_port_out(u32 port, u32 val, int size);
 extern u8 vga_mem[262144];
+extern u32 vga_gen, vga_dac_gen;
 extern u8 vga_dac[768];
 void vga_vsync(void);
 /* hw */

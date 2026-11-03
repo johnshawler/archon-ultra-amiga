@@ -1111,7 +1111,7 @@ class X:
             self.load_mem(i, t, 'd7', 4)
         if retv is not None: self.e(f'pea {hexs(retv)}')       # return address pushed AFTER the target operand was evaluated
         self.e(f'sub.l #{hexs(self.base)},%d7')
-        self.e(f'lea {self.dispatch},%a0')
+        self.e(f'lea ({self.dispatch},%pc),%a0')
         self.e('move.l (%a0,%d7.l*4),%a0')
         self.e('jmp (%a0)')
 
@@ -1121,7 +1121,7 @@ class X:
         for l in swap32('d7'): self.e(l)
         if i.operands: self.e(f'lea {i.operands[0].imm}(%sp),%sp')
         self.e(f'sub.l #{hexs(self.base)},%d7')
-        self.e(f'lea {self.dispatch},%a0')
+        self.e(f'lea ({self.dispatch},%pc),%a0')
         self.e('move.l (%a0,%d7.l*4),%a0')
         self.e('move.w 28(%a6),%ccr')
         self.e('jmp (%a0)')
