@@ -314,7 +314,7 @@ static int int33(struct regs *r) {
 #ifdef HOSTED
     if (rt_replay) {            /* replay the reference emulator's mouse driver results, in call order */
         if (!m33_loaded) { m33_loaded = 1; FILE *f = fopen("int33.log", "r"); if (f) { long i; unsigned a, b, c, d, e, g, h, k;
-            while (nm33 < 20000 && fscanf(f, "%ld %x %x %x %x %x %x %x %x", &i, &a, &b, &c, &d, &e, &g, &h, &k) == 9) { m33[nm33].axin = a; m33[nm33].ax = e; m33[nm33].bx = g; m33[nm33].cx = h; m33[nm33].dx = k; nm33++; } fclose(f); } }
+            while (nm33 < 20000 && fscanf(f, "%ld %x %x %x %x %x %x %x %x", &i, &a, &b, &c, &d, &e, &g, &h, &k) == 9) { if (i == 0) continue; m33[nm33].axin = a; m33[nm33].ax = e; m33[nm33].bx = g; m33[nm33].cx = h; m33[nm33].dx = k; nm33++; } fclose(f); } }
         if (pm33 < nm33) {
             if (m33[pm33].axin != ax) plat_log("replay: int33 call %d ax=%04x, reference %04x\n", pm33, ax, m33[pm33].axin);
             r->eax = (r->eax & ~0xFFFFu) | m33[pm33].ax; r->ebx = (r->ebx & ~0xFFFFu) | m33[pm33].bx; r->ecx = (r->ecx & ~0xFFFFu) | m33[pm33].cx; r->edx = (r->edx & ~0xFFFFu) | m33[pm33].dx;
