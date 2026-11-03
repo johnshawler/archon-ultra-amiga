@@ -367,7 +367,6 @@ u32 rt_c_trace(u32 addr, struct regs *r) {
     while (evp < nev && ev[evp].idx == trn) {
         int vec = ev[evp++].vec;
         if (vec == 8 && !vec_pm[8]) { st32(0x46C, ld32(0x46C) + 1); continue; }
-        if (vec_pm[vec] && !CTX->iflag) { static int nd; if (nd++ < 50) plat_log("replay: IRQ %x at %ld dropped (IF=0)\n", vec, trn); continue; }
         if (vec_pm[vec]) {
             if (vec == 0x70) { extern void hw_rtc_flag(void); hw_rtc_flag(); }
             u32 off = vec_pm[vec] - XL_BASE; u32 t = xl_tab[off];

@@ -28,15 +28,22 @@ int main(int argc, char **argv) {
     size_t *rd = malloc(nd * sizeof(size_t)), *ro = malloc(no * sizeof(size_t));
     size_t cd = collapse(d, nd, rd), co = collapse(o, no, ro), n = cd < co ? cd : co;
     printf("collapsed lengths %zu %zu\n", cd, co);
-    for (size_t k = 0; k < n; k++)
-        if (d[k] != o[k]) {
-            printf("EIP diverges at collapsed step %zu: dosbox %x ours %x (obj1 offsets); raw index dosbox %zu ours %zu\ncontext dosbox:", k, d[k], o[k], rd[k], ro[k]);
-            for (size_t j = k > 12 ? k - 12 : 0; j < k + 4 && j < n; j++) printf(" %x", d[j]);
-            printf("\ncontext ours  :");
-            for (size_t j = k > 12 ? k - 12 : 0; j < k + 4 && j < n; j++) printf(" %x", o[j]);
-            printf("\n");
-            return 1;
+    /* DOSBox does not trace an interrupt handler that it runs inside its nested INT 21h processing; we do. Skip our handler run (entry 'hv') when the
+       DOSBox stream has none and resumes at the instruction we reach after it. */
+    uint32_t hv = argc > 4 ? strtoul(argv[4], 0, 16) : 0x208d6; size_t skips = 0, kd = 0, ko = 0;
+    while (kd < cd && ko < co) {
+        if (d[kd] == o[ko]) { kd++; ko++; continue; }
+        if (o[ko] == hv) {
+            size_t j = ko; while (j < co && j < ko + 20000 && o[j] != d[kd]) j++;
+            if (j < co && o[j] == d[kd]) { skips++; printf("skipped our handler run at raw %zu (%zu steps)\n", ro[ko], j - ko); ko = j; continue; }
         }
-    printf("no divergence in %zu collapsed steps\n", n);
+        printf("EIP diverges at collapsed steps dosbox %zu ours %zu: dosbox %x ours %x (obj1 offsets); raw index dosbox %zu ours %zu\ncontext dosbox:", kd, ko, d[kd], o[ko], rd[kd], ro[ko]);
+        for (size_t t = kd > 12 ? kd - 12 : 0; t < kd + 4 && t < cd; t++) printf(" %x", d[t]);
+        printf("\ncontext ours  :");
+        for (size_t t = ko > 12 ? ko - 12 : 0; t < ko + 4 && t < co; t++) printf(" %x", o[t]);
+        printf("\n");
+        return 1;
+    }
+    printf("no divergence: %zu / %zu collapsed steps compared, %zu untraced-handler skips\n", kd, ko, skips);
     return 0;
 }
