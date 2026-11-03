@@ -19,6 +19,11 @@ struct ctx {
     u16 pad28;
     u32 tmp[4];          /* 32..47 */
     u32 saved_regs[8];   /* 48.. */
+    u16 sel[6];          /* 80: es cs ss ds fs gs selector values */
+    u32 pad92;
+    u32 regs[8];         /* 96: register save area used by the asm stubs */
+    u32 pad128[2];
+    u16 ccr_stub;        /* 136 */
 };
 
 /* Registers as passed to C by the asm stubs (d0..d6 = eax ecx edx ebx ebp esi edi). */
@@ -54,8 +59,19 @@ int  rt_c_int(u32 vec, struct regs *r);       /* returns carry */
 u32  rt_c_in(u32 port, int size);
 void rt_c_out(u32 port, u32 val, int size);
 u32  rt_c_str(int op, struct regs *r);        /* returns 68k ccr bits (scas/cmps) */
-void rt_c_poll(struct regs *r);
+u32  rt_c_poll(struct regs *r);
+void rt_c_badtarget(u32 off, u32 ret);
+void plat_audio_push(const unsigned char *d, u32 n, u32 rate, int is16, int stereo, int sign);
+void plat_vsync(u32 frame);
+void rt_init(u8 *win, struct ctx *ctx);
+void rt_enter(u8 *win, struct ctx *ctx, u32 esp, void *entry);
+void hw_key(u8 sc);
+void vga_get_display(u32 *start, u32 *pitch, int *chain4);
+u32 vga_pan(void);
+u32 hw_now(void);
 void rt_c_unimpl(u32 where);
+u32  rt_c_trace(u32 addr, struct regs *r);
+void hw_advance(u32 now_us);
 u32  rt_mk_eflags(u32 ccr);
 u32  rt_set_eflags(u32 v);                    /* returns ccr */
 void rt_c_setseg(int which, u32 sel);

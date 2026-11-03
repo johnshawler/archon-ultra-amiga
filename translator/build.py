@@ -1,5 +1,5 @@
 """Whole-program driver: discovery + liveness + translation -> 68k assembly for obj1."""
-import sys, os, gzip, collections
+import sys, os, gzip, collections, re
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from le import LE
 from discover import fixup_map
@@ -8,7 +8,8 @@ from capstone.x86 import *
 import xl
 from xl import X, Unsupported, CF, ZF, SF, OF, ALL, COND, COND_ALIAS
 
-BASE = 0x10000
+import layout
+BASE = layout.OBJ_BASES[0]
 
 def decode_all(le, seeds):
     code = bytes(le.mem[1]); size = len(code)
@@ -30,6 +31,7 @@ def decode_all(le, seeds):
     roots = [BASE + le.eip] + [t[2] + BASE for s, t in fx.items() if t[1] == 1]
     work = list(roots) + [i.operands[0].imm for i in list(ins.values()) if i.operands and i.operands[0].type == X86_OP_IMM and (X86_GRP_JUMP in i.groups or X86_GRP_CALL in i.groups)]
     seen = set()
+    strong = set(trusted) | set(roots) | set(i.operands[0].imm for i in list(ins.values()) if i.operands and i.operands[0].type == X86_OP_IMM and X86_GRP_CALL in i.groups)
     while work:
         a = work.pop()
         while BASE <= a < BASE + size:
@@ -41,6 +43,7 @@ def decode_all(le, seeds):
                 if i is None: break
                 # overlap with a trusted instruction at a different alignment?
                 if any(cov[a - BASE + k] for k in range(i.size)): break
+                if any((a + k) in strong for k in range(1, i.size)): break      # would swallow a known entry point
                 ins[a] = i; seen.add(a)
                 for k in range(i.size): cov[a - BASE + k] = 2
             i = ins[a]
@@ -80,10 +83,44 @@ def flag_sets(i):
         c = i.operands[1] if len(i.operands) > 1 else None
         kill = (CF | OF) if (c is None or c.type == X86_OP_IMM) else 0
     if m in ('rcl', 'rcr'): kill = 0
-    if i.mnemonic.startswith('repe') or i.mnemonic.startswith('repne'):
-        if 'scas' in i.mnemonic or 'cmps' in i.mnemonic: kill = ALL
-    if m in ('scasb', 'scasw', 'scasd', 'cmpsb', 'cmpsw', 'cmpsd') and i.mnemonic.startswith('rep'): kill = ALL
+    if i.mnemonic.startswith('rep') and ('scas' in i.mnemonic or 'cmps' in i.mnemonic):
+        kill = 0; use = ALL            # count 0 leaves the flags untouched
     return use, kill
+
+def ds_states(ins, entries):
+    """Forward analysis: which instructions run with a possibly non-flat DS (after mov/pop/lds ds until the matching restore)."""
+    def isdsload(i):
+        if i.mnemonic == 'mov' and i.operands[0].type == X86_OP_REG and i.reg_name(i.operands[0].reg) == 'ds': return True
+        if i.mnemonic == 'pop' and i.operands[0].type == X86_OP_REG and i.reg_name(i.operands[0].reg) == 'ds': return True
+        return i.mnemonic == 'lds'
+    def ispushds(i): return i.mnemonic == 'push' and i.operands[0].type == X86_OP_REG and i.reg_name(i.operands[0].reg) == 'ds'
+    def ispopds(i): return i.mnemonic == 'pop' and i.operands[0].type == X86_OP_REG and i.reg_name(i.operands[0].reg) == 'ds'
+    seen = {}
+    work = [(e, 'F', ()) for e in entries if e in ins]
+    U = set()
+    while work:
+        a, st, stk = work.pop()
+        while a in ins:
+            key = (st, stk)
+            if key in seen.setdefault(a, set()): break
+            seen[a].add(key)
+            i = ins[a]
+            if st == 'U': U.add(a)
+            # transfer
+            if ispushds(i): stk = stk + (st,)
+            elif ispopds(i):
+                if stk: st = stk[-1]; stk = stk[:-1]
+                else: st = 'U'
+            elif isdsload(i): st = 'U'
+            g = set(i.groups); mn = i.mnemonic
+            if i.id in (X86_INS_RET, X86_INS_IRET, X86_INS_IRETD, X86_INS_HLT): break
+            nxt = a + i.size
+            if (X86_GRP_JUMP in g) and i.operands and i.operands[0].type == X86_OP_IMM:
+                work.append((i.operands[0].imm, st, stk))
+                if mn == 'jmp': break
+            elif (X86_GRP_JUMP in g) and mn == 'jmp': break
+            a = nxt
+    return U
 
 def liveness(ins):
     succ = {}
@@ -114,6 +151,7 @@ def liveness(ins):
         for t in succ[a]: out |= live_in[t]
         use, kill = flag_sets(i)
         if X86_GRP_CALL in i.groups: out = 0       # flags dead across calls (Watcom/cdecl)
+        if i.id in (X86_INS_RET,): out = ALL     # ret preserves the flags: whatever the caller does with them is live
         new_in = use | (out & ~kill)
         live_out[a] = out
         if new_in != live_in[a]:
@@ -124,10 +162,23 @@ def liveness(ins):
 
 def main(exe, seeds_path, outs, stats=True):
     le = LE(exe)
-    seeds = [int(l, 16) - 0x15D000 for l in gzip.open(seeds_path, 'rt') if l.strip()]
+    seeds = [int(l, 16) - 0x16d000 + BASE for l in gzip.open(seeds_path, 'rt') if l.strip()]
     ins, trusted = decode_all(le, seeds)
     live = liveness(ins)
     label = lambda a: 'L%x' % a
+    vga_rd = set()
+    try:
+        for l in open(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'traces', 'cc4', 'vga_sites.log')):
+            p = l.split(); a = int(p[0], 16) - 0x16d000 + BASE
+            if a in ins and ins[a].mnemonic == 'mov': vga_rd.add(a)
+    except IOError: pass
+    xl.VGA_MOV_SITES = vga_rd
+    entries = set([BASE + le.eip] + [i.operands[0].imm for i in ins.values() if i.operands and i.operands[0].type == X86_OP_IMM and X86_GRP_CALL in i.groups] + [t[2] + BASE for t in fixup_map(le).values() if t[1] == 1] + list(trusted))
+    dsU = ds_states(ins, entries)
+    heads = set()
+    for a, i in ins.items():
+        if i.operands and i.operands[0].type == X86_OP_IMM and ((X86_GRP_JUMP in i.groups) or i.mnemonic.startswith('loop')) and i.operands[0].imm <= a and i.operands[0].imm in ins:
+            heads.add(i.operands[0].imm)
     # branch/call targets must exist as labels
     lines = ['\t.text', '\t.even']
     unsup = collections.Counter(); unsup_trusted = collections.Counter(); n_ok = 0
@@ -135,12 +186,19 @@ def main(exe, seeds_path, outs, stats=True):
     for a, i in ins.items():
         if i.operands and i.operands[0].type == X86_OP_IMM and ((X86_GRP_JUMP in i.groups) or (X86_GRP_CALL in i.groups)):
             targets.add(i.operands[0].imm)
-    xt = X(label)
+    xt = X(label, 'xl_tab', BASE)
     starts = []
     for a in sorted(ins):
         i = ins[a]
         lines.append(f'{label(a)}:')
+        if os.environ.get('XL_TRACE'):
+            lines.append(f'\tjbsr rt_trace\n\t.long 0x{a:x}')
+        if a in heads:
+            use, kill = flag_sets(i)
+            if (use | (live[a] & ~kill)) == 0:
+                lines.append('\tsubq.l #1,(%a6)\n\tbpl 9f\n\tjbsr rt_poll\n9:')
         try:
+            xt.ds_dyn = a in dsU
             body = xt.insn(i, live[a])
             lines.extend(body); n_ok += 1
         except Unsupported as e:
@@ -155,8 +213,18 @@ def main(exe, seeds_path, outs, stats=True):
     missing = sorted(t for t in targets if t not in ins and BASE <= t < BASE + len(le.mem[1]))
     for t in missing:
         lines.append(f'{label(t)}:\n\tjbsr rt_badjump\n\t.long 0x{t:x}')
-    open(outs, 'w').write('\n'.join(lines) + '\n')
+    txt = '\n'.join(lines) + '\n'
+    defined = set(re.findall(r'^(L[0-9a-f]+):', txt, re.M))
+    refd = set(re.findall(r'\b(L[0-9a-f]+)\b', txt))
+    for u in sorted(refd - defined):
+        txt += f'{u}:\n\tjbsr rt_badjump\n\t.long 0x{int(u[1:], 16) & 0xFFFFFFFF:x}\n'
+    open(outs, 'w').write(txt)
     open(outs + '.starts', 'w').write('\n'.join('%x' % a for a in starts) + '\n')
+    ent = BASE + le.eip
+    tab = ['\t.data', '\t.even', '\t.globl xl_start_list', 'xl_start_list:']
+    for a in starts: tab.append(f'\t.long 0x{a - BASE:x}, {label(a)}')
+    tab += ['\t.long -1, 0', '\t.globl xl_entry', f'xl_entry:\t.long {label(ent)}', '\t.globl xl_nstarts', f'xl_nstarts:\t.long {len(starts)}']
+    open(outs, 'a').write('\n'.join(tab) + '\n')
     if stats:
         print('instructions', len(ins), 'trusted', len(trusted), 'translated ok', n_ok, 'branch targets missing', len(missing))
         print('unsupported (trusted/executed):', unsup_trusted.most_common())

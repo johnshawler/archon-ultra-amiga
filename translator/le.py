@@ -1,8 +1,9 @@
 """LE (Linear Executable) loader for the DOS/4GW-bound ARCHON.EXE: objects, page data, fixups."""
-import struct
+import struct, os, sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 class LE:
-    def __init__(self, path):
+    def __init__(self, path, bases=None):
         d = open(path, 'rb').read(); self.d = d
         o = d.find(b'LE\x00\x00', 0x20000)
         assert o > 0; self.o = o
@@ -17,6 +18,9 @@ class LE:
         for i in range(self.nobj):
             vs, base, fl, pmi, np_, _ = struct.unpack_from('<IIIIII', d, o + self.objtab + i * 24)
             self.objs.append(dict(size=vs, base=base, flags=fl, pmi=pmi, npages=np_))
+        if bases is None:
+            import layout; bases = layout.OBJ_BASES
+        for k, ob in enumerate(self.objs): ob['base'] = bases[k]
         self.datastart = 0x37214          # file offset of page 1 (checked by the Watcom _start stub at +0x26D2E)
         self.pagesize = 4096
         self.mem = {}
@@ -25,8 +29,10 @@ class LE:
             for p in range(ob['npages']):
                 pg = ob['pmi'] - 1 + p
                 src = self.datastart + pg * self.pagesize
-                buf[p * self.pagesize:(p + 1) * self.pagesize] = d[src:src + self.pagesize] if src < len(d) else b''
-            self.mem[n + 1] = buf[:ob['size']] if ob['size'] <= len(buf) else buf
+                chunk = d[src:src + self.pagesize] if src < len(d) else b''
+                buf[p * self.pagesize:p * self.pagesize + len(chunk)] = chunk
+            if len(buf) < ob['size']: buf += bytes(ob['size'] - len(buf))
+            self.mem[n + 1] = buf[:max(ob['size'], 0)] if ob['size'] >= len(buf) - self.pagesize else buf
         self.fixups = self._parse_fixups()
         self.apply_fixups()
 
@@ -67,8 +73,12 @@ class LE:
                     off = (pg - (ob['pmi'] - 1)) * 4096 + s_
                     m = self.mem[k + 1]
                     tb = self.objs[tobj - 1]['base']
+                    sel = 0x170 if self.objs[tobj - 1]['flags'] & 4 else 0x178
                     if kind in (7, 6) and 0 <= off and off + 4 <= len(m):
                         struct.pack_into('<I', m, off, (tb + toff) & 0xFFFFFFFF); n += 1
+                        if kind == 6 and off + 6 <= len(m): struct.pack_into('<H', m, off + 4, sel)
+                    elif kind in (2, 3) and off + 2 <= len(m):
+                        struct.pack_into('<H', m, off, sel); n += 1
                     elif kind == 5 and off + 2 <= len(m):
                         struct.pack_into('<H', m, off, (tb + toff) & 0xFFFF); n += 1
                     break

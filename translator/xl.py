@@ -15,6 +15,8 @@ from capstone.x86 import *
 CF, ZF, SF, OF = 1, 2, 4, 8
 ALL = CF | ZF | SF | OF
 
+VGA_MOV_SITES = set()
+
 class Unsupported(Exception):
     pass
 
@@ -48,6 +50,7 @@ def swapped_imm(v, size):
 def hexs(v):
     return '0x%x' % (v & 0xFFFFFFFF)
 
+SELOFF = {'es': 80, 'cs': 82, 'ss': 84, 'ds': 86, 'fs': 88, 'gs': 90}
 CTX = {'poll': 0, 'if': 4, 'es': 8, 'fs': 12, 'gs': 16, 'ds': 20, 'df': 24, 'tmp': 28}
 
 class X:
@@ -58,6 +61,7 @@ class X:
         self.dispatch = dispatch_sym
         self.base = code_base
         self.df = df_known
+        self.ds_dyn = False
         self.out = []
         self.warn = []
 
@@ -89,7 +93,8 @@ class X:
         sc = m.scale
         disp = m.disp + extra
         pre = []
-        if seg in ('fs', 'gs', 'es', 'cs', 'ss') and seg in ('fs', 'gs', 'es'):
+        if seg is None and self.ds_dyn and base not in ('esp', 'ebp'): seg = 'ds'
+        if seg in ('fs', 'gs', 'es', 'ds'):
             # non-flat segment bases are supported through the context (rt keeps es/fs/gs bases); ds/ss/cs flat
             pre.append(f'move.l {CTX[seg]}(%a6),%d7') if False else None
             segadd = seg
@@ -180,7 +185,21 @@ class X:
         prefix = ''
         if m.startswith('rep'):
             prefix, m = m.split(' ', 1)
+        elif m[:4] in ('movs', 'stos', 'lods', 'outs') and len(m) == 5 and m[4] in 'bwd' and any(b in (0xF2, 0xF3) for b in bytes(i.bytes)[:max(0, i.size - 1)]):
+            prefix = 'rep'            # capstone drops the (undefined but executed) F2 prefix on these
         key = m.replace('.', '_')
+        # xchg between a high byte register and another register of a different parent
+        if m == 'xchg' and all(o.type == X86_OP_REG for o in i.operands):
+            n0, n1 = i.reg_name(i.operands[0].reg), i.reg_name(i.operands[1].reg)
+            if (n0 in R8H) != (n1 in R8H) and n0 in (R8H.keys() | R8L.keys()) and n1 in (R8H.keys() | R8L.keys()):
+                h, l = (n0, n1) if n0 in R8H else (n1, n0)
+                hp, lp = R8H[h], R8L[l]
+                if hp != lp:
+                    def xb():
+                        self.e(f'move.w %{hp},%d7'); self.e('lsr.w #8,%d7')
+                        self.e(f'rol.w #8,%{hp}'); self.e(f'move.b %{lp},%{hp}'); self.e(f'rol.w #8,%{hp}')
+                        self.e(f'move.b %d7,%{lp}')
+                    self.protected(live, xb); return self.out
         # xchg ah,al
         if m == 'xchg' and [i.reg_name(o.reg) for o in i.operands if o.type == X86_OP_REG] in (['ah', 'al'], ['al', 'ah'], ['ch', 'cl'], ['cl', 'ch'], ['dh', 'dl'], ['dl', 'dh'], ['bh', 'bl'], ['bl', 'bh']):
             r = self.r(i.reg_name(i.operands[0].reg))[0]
@@ -191,6 +210,17 @@ class X:
             if d0 is not None and d0.type == X86_OP_REG and i.reg_name(d0.reg) in R8H:
                 hn = i.reg_name(d0.reg); parent = R8H[hn]
                 lowname = {'ah': 'al', 'ch': 'cl', 'dh': 'dl', 'bh': 'bl'}[hn]
+                if m in ('shl', 'shr', 'sar', 'sal') and len(i.operands) > 1 and i.operands[1].type == X86_OP_REG and i.reg_name(i.operands[1].reg) == 'cl' and parent == 'd1':
+                    op68 = {'shl': 'lsl', 'sal': 'lsl', 'shr': 'lsr', 'sar': 'asr'}[m]
+                    if live & ALL: self.e('move.w %ccr,40(%a6)')
+                    self.e('move.l %d1,%d7'); self.e('and.l #31,%d7')
+                    if live & ALL: self.e('beq 7f')
+                    self.e('rol.w #8,%d1'); self.e(f'{op68}.b %d7,%d1')
+                    if live & ALL:
+                        self.e('move.w %ccr,28(%a6)'); self.e('rol.w #8,%d1'); self.e('move.w 28(%a6),%ccr'); self.e('bra 8f')
+                        self.e('7: move.w 40(%a6),%ccr'); self.e('8:')
+                    else: self.e('rol.w #8,%d1')
+                    return self.out
                 other_h = any(o.type == X86_OP_REG and i.reg_name(o.reg) in R8H for o in i.operands[1:])
                 same_parent = any(o.type == X86_OP_REG and i.reg_name(o.reg) in (lowname,) for o in i.operands[1:])
                 if not other_h and not same_parent and m not in ('mov',):
@@ -276,16 +306,33 @@ class X:
     def x_mov(self, i, live, pfx):
         d, s = i.operands[0], i.operands[1]
         size = d.size
+        if i.address in VGA_MOV_SITES and s.type == X86_OP_MEM and d.type == X86_OP_REG and size == 1:
+            # byte read that may hit the VGA window: route through the VGA model when the address is inside it
+            pre, ea = self.mem(i, s)
+            for l in pre: self.e(l)
+            dr, k = self.r(i.reg_name(d.reg))
+            def body():
+                self.e(f'lea {ea},%a0'); self.e('move.l %a0,%d7'); self.e('sub.l %a5,%d7')
+                self.e('jbsr rt_vga_rd8'); self.e(f'move.b %d7,%{dr}') if k != 'h' else None
+            self.protected(live, body); return
         def body():
             if d.type == X86_OP_REG:
                 dn = i.reg_name(d.reg)
                 if dn in SEGREGS: return self.mov_seg(i, d, s)
                 dr, k = self.r(dn)
                 if s.type == X86_OP_REG and i.reg_name(s.reg) in SEGREGS:
-                    self.e(f'moveq #0,%{dr}' if False else f'move.w #0x178,%{dr}'); return
+                    sn2 = i.reg_name(s.reg)
+                    self.e(f'moveq #0,%{dr}') if size == 4 else None
+                    self.e(f'move.w {SELOFF[sn2]}(%a6),%{dr}'); return
                 if k == 'h':
                     # ah <- src : rol.w #8 ; move.b ; rol.w #8
-                    sv = self.src_val(i, s, 1, 'd7')
+                    if s.type == X86_OP_REG:
+                        sr0, sk0 = self.r(i.reg_name(s.reg))
+                        if sk0 == 'h': self.e(f'move.w %{sr0},%d7'); self.e('lsr.w #8,%d7')
+                        else: self.e(f'move.b %{sr0},%d7')
+                        sv = '%d7'
+                    else:
+                        sv = self.src_val(i, s, 1, 'd7')
                     self.e(f'rol.w #8,%{dr}'); self.e(f'move.b {sv},%{dr}'); self.e(f'rol.w #8,%{dr}'); return
                 if s.type == X86_OP_MEM:
                     self.load_mem(i, s, dr, size)
@@ -299,6 +346,11 @@ class X:
                         self.e(f'move.{SZ[size]} %{sr},%{dr}')
                 return
             # memory destination
+            if s.type == X86_OP_REG and i.reg_name(s.reg) in SEGREGS:
+                self.e(f'move.w {SELOFF[i.reg_name(s.reg)]}(%a6),%d7'); self.e('ror.w #8,%d7')
+                pre, ea = self.mem(i, d)
+                for l in pre: self.e(l)
+                self.e(f'move.w %d7,{ea}'); return
             if s.type == X86_OP_IMM:
                 v = s.imm & ((1 << 8 * size) - 1)
                 pre, ea = self.mem(i, d)
@@ -336,8 +388,11 @@ class X:
                 else:
                     srcr = sr
             if ds_ == 4:
-                self.e(f'moveq #0,%{dr}')
-                self.e(f'move.{SZ[ssz]} %{srcr},%{dr}')
+                if srcr == dr:
+                    self.e(f'and.l #{0xFFFF if ssz == 2 else 0xFF},%{dr}')
+                else:
+                    self.e(f'moveq #0,%{dr}')
+                    self.e(f'move.{SZ[ssz]} %{srcr},%{dr}')
             else:  # 16-bit dest from byte: only low word written
                 self.e(f'moveq #0,%d7') if srcr != 'd7' else None
                 if srcr != 'd7':
@@ -419,25 +474,17 @@ class X:
             rr, rk = self.r(i.reg_name(reg.reg))
             if rk == 'h': raise Unsupported('xchg h')
             self.load_mem(i, mem, 'd7', size)
-            self.store_mem(i, mem, rr, size, 'a?') if False else None
-            # store reg to mem (needs second temp for swap): use stack
-            self.e(f'move.l %{rr},-(%sp)')
-            pre, ea = self.mem(i, mem, extra=0)
-            # recompute ea relative to unchanged a7? mem operand with esp base would be off by 4; handle
-            if (i.reg_name(mem.mem.base) if mem.mem.base else None) == 'esp':
-                raise Unsupported('xchg esp')
+            pre, ea = self.mem(i, mem)
             for l in pre: self.e(l)
-            self.e(f'move.l (%sp)+,%{rr}') if False else None
-            self.e(f'move.l (%sp),%a1') if False else None
-            # byte swap reg copy in a1-free way: do swap on stack copy via d-reg trick
-            self.e(f'exg %d7,%{rr}')            # d7=reg value, rr=mem value
-            sw = swap32 if size == 4 else swap16
-            if size == 1:
-                self.e(f'move.b %d7,{ea}')
+            if size == 4:
+                self.e(f'exg %d7,%{rr}')                    # d7 = old register value, register = memory value
+                for l in swap32('d7'): self.e(l)
+                self.e(f'move.l %d7,{ea}')
             else:
-                for l in sw('d7'): self.e(l)
+                self.e(f'move.{SZ[size]} %{rr},56(%a6)'); self.e(f'move.{SZ[size]} %d7,%{rr}'); self.e(f'move.{SZ[size]} 56(%a6),%d7')
+                if size == 2:
+                    for l in swap16('d7'): self.e(l)
                 self.e(f'move.{SZ[size]} %d7,{ea}')
-            self.e('addq.l #4,%sp')
         self.protected(live, body)
 
     def x_cwde(self, i, live, pfx):
@@ -466,12 +513,17 @@ class X:
         if d.type == X86_OP_REG:
             dn = i.reg_name(d.reg); dr, dk = self.r(dn)
             if dk == 'h':
-                # operate on swapped copy
-                self.e(f'rol.w #8,%{dr}')
+                # operate on a rotated copy; the source byte is captured BEFORE the rotation (it may live in the same register)
+                if s.type == X86_OP_REG and i.reg_name(s.reg) == dn and op68 in ('eor', 'sub') :
+                    # xor ah,ah / sub ah,ah  ->  ah = 0 , ZF=1, others 0
+                    self.e(f'rol.w #8,%{dr}'); self.e(f'clr.b %{dr}')
+                    self.protected(live, lambda: self.e(f'rol.w #8,%{dr}'))
+                    return
                 sv = self.src_val(i, s, 1, 'd7')
+                if sv.startswith('%d') and sv != '%d7':
+                    self.e(f'move.b {sv},%d7'); sv = '%d7'
+                self.e(f'rol.w #8,%{dr}')
                 self.alu_emit(op68, 'b', sv, f'%{dr}', s)
-                if wb: pass
-                # rol back must not disturb flags
                 self.protected(live, lambda: self.e(f'rol.w #8,%{dr}'))
                 return
             sv = self.src_val(i, s, size, 'd7')
@@ -588,9 +640,9 @@ class X:
                 self.protected(live, st)
         if live & CF:
             # preserve CF across inc/dec
-            self.e('scs -(%sp)')
+            self.e('scs 44(%a6)')
             go()
-            self.e('move.w %ccr,%d7'); self.e('and.w #0x1e,%d7'); self.e('tst.b (%sp)+'); self.e('beq 9f'); self.e('or.w #1,%d7')
+            self.e('move.w %ccr,%d7'); self.e('and.w #0x1e,%d7'); self.e('tst.b 44(%a6)'); self.e('beq 9f'); self.e('or.w #1,%d7')
             self.e('9: move.w %d7,%ccr')
         else:
             go()
@@ -636,7 +688,7 @@ class X:
 
     # carry-dependent
     def setx_from_c(self):
-        self.e('scs -(%sp)'); self.e('neg.b (%sp)'); self.e('lea 2(%sp),%sp')
+        self.e('scs 44(%a6)'); self.e('neg.b 44(%a6)')
 
     def adcsbb(self, i, live, op):
         d, s = i.operands; size = d.size; sz = SZ[size]
@@ -710,10 +762,7 @@ class X:
                 else:
                     self.e(f'moveq #{n},%d7'); self.e(f'{op68}.{sz} %d7,{tg}')
             else:
-                self.e('move.l %d1,%d7'); self.e('and.l #31,%d7')
-                if op68 in ('rol', 'ror', 'roxl', 'roxr') and size < 4:
-                    pass
-                self.e(f'{op68}.{sz} %d7,{tg}')
+                self.var_shift(op68, sz, tg, live)
         if x: self.setx_from_c()
         if not mem:
             emit_shift(tgt); return
@@ -722,7 +771,7 @@ class X:
         if imm:
             emit_shift('%d7')
         else:
-            self.e('movem.l %d6,32(%a6)'); self.e('move.l %d1,%d6'); self.e('and.l #31,%d6'); self.e(f'{op68}.{sz} %d6,%d7'); self.e('movem.l 32(%a6),%d6')
+            self.var_shift(op68, sz, '%d7', live)
         def st():
             pre, ea = self.mem(i, d)
             for l in pre: self.e(l)
@@ -732,6 +781,16 @@ class X:
                 for l in swap16('d7'): self.e(l)
             self.e(f'move.{sz} %d7,{ea}')
         self.protected(live, st)
+
+    def var_shift(self, op68, sz, tg, live):
+        """shift by cl: x86 masks the count to 5 bits and leaves the flags alone when it is 0."""
+        if live & ALL:
+            self.e('move.w %ccr,28(%a6)')
+            self.e('move.l %d1,%d7'); self.e('and.l #31,%d7'); self.e('beq 7f')
+            self.e(f'{op68}.{sz} %d7,{tg}'); self.e('bra 8f')
+            self.e('7: move.w 28(%a6),%ccr'); self.e('8:')
+        else:
+            self.e('move.l %d1,%d7'); self.e('and.l #31,%d7'); self.e(f'{op68}.{sz} %d7,{tg}')
 
     def x_shl(self, i, live, pfx): self.shift(i, live, 'lsl')
     def x_sal(self, i, live, pfx): self.shift(i, live, 'lsl')
@@ -776,8 +835,7 @@ class X:
                 self.e(f'move.w {sv},-(%sp)') if False else None
                 self.e(f'move.w %{dr},%d7') if sv != '%d7' else None
                 if sv == '%d7':
-                    self.e(f'move.l %d7,-(%sp)'); self.e(f'move.w %{dr},%d7'); self.e('muls.w (%sp)+,%d7') if False else None
-                    self.e('muls.w 2(%sp),%d7'); self.e('addq.l #4,%sp')
+                    self.e('move.w %d7,52(%a6)'); self.e(f'move.w %{dr},%d7'); self.e('muls.w 52(%a6),%d7')
                 else:
                     self.e(f'muls.w {sv},%d7')
                 self.e(f'move.w %d7,%{dr}')
@@ -924,22 +982,26 @@ class X:
     def x_push(self, i, live, pfx):
         s = i.operands[0]
         if s.type == X86_OP_IMM:
+            if s.size == 2:
+                self.protected(live, lambda: self.e(f'move.w #{hexs(swapped_imm(s.imm, 2))},-(%sp)')); return
             self.e(f'pea {hexs(swapped_imm(s.imm, 4))}'); return
         def body():
             if s.type == X86_OP_REG:
                 n = i.reg_name(s.reg)
                 if n in SEGREGS:
-                    self.e('pea 0x78010000') if n in ('ds', 'es', 'ss') else self.e('pea 0x00000000'); return
+                    self.e(f'moveq #0,%d7'); self.e(f'move.w {SELOFF[n]}(%a6),%d7')
+                    for l in swap32('d7'): self.e(l)
+                    self.e('move.l %d7,-(%sp)'); return
                 if n == 'esp':
                     self.e('move.l %sp,%d7'); self.e('sub.l %a5,%d7')
                 else:
                     r, k = self.r(n)
                     if k == 'w':
-                        self.e(f'move.w %{r},%d7') if False else None
-                        raise Unsupported('push16')
+                        self.e(f'move.w %{r},%d7'); self.e('ror.w #8,%d7'); self.e('move.w %d7,-(%sp)'); return
                     self.e(f'move.l %{r},%d7')
             else:
-                if s.size != 4: raise Unsupported('push16 mem')
+                if s.size == 2:
+                    self.load_mem(i, s, 'd7', 2); self.e('ror.w #8,%d7'); self.e('move.w %d7,-(%sp)'); return
                 self.load_mem(i, s, 'd7', 4)
             for l in swap32('d7'): self.e(l)
             self.e('move.l %d7,-(%sp)')
@@ -951,14 +1013,20 @@ class X:
             if d.type == X86_OP_REG:
                 n = i.reg_name(d.reg)
                 if n in SEGREGS:
-                    self.e('move.l (%sp)+,%d7');
+                    self.e('move.l (%sp)+,%d7')
                     for l in swap32('d7'): self.e(l)
                     self.e(f'jbsr rt_setseg_{n}'); return
                 r, k = self.r(n)
-                if k != 'l': raise Unsupported('pop16')
+                if k == 'w':
+                    self.e('move.w (%sp)+,%d7'); self.e('ror.w #8,%d7'); self.e(f'move.w %d7,%{r}'); return
                 self.e(f'move.l (%sp)+,%{r}')
                 for l in swap32(r): self.e(l)
             else:
+                if d.size == 2:
+                    self.e('move.w (%sp)+,%d7'); self.e('ror.w #8,%d7')
+                    pre, ea = self.mem(i, d)
+                    for l in pre: self.e(l)
+                    self.e('ror.w #8,%d7'); self.e(f'move.w %d7,{ea}'); return
                 self.e('move.l (%sp)+,%d7')
                 for l in swap32('d7'): self.e(l)
                 pre, ea = self.mem(i, d)
@@ -1022,10 +1090,12 @@ class X:
     # ------------------------------------------------------------------ control flow
     def x_call(self, i, live, pfx):
         t = i.operands[0]
+        retv = swapped_imm(i.address + i.size, 4)
         if t.type == X86_OP_IMM:
-            self.e(f'jbsr {self.label_of(t.imm)}')
+            self.e(f'pea {hexs(retv)}')
+            self.e(f'jbra {self.label_of(t.imm)}')
         else:
-            self.indirect(i, t, 'jsr')
+            self.indirect(i, t, 'jmp', retv)
 
     def x_jmp(self, i, live, pfx):
         t = i.operands[0]
@@ -1034,24 +1104,30 @@ class X:
         else:
             self.indirect(i, t, 'jmp')
 
-    def indirect(self, i, t, how):
+    def indirect(self, i, t, how, retv=None):
         if t.type == X86_OP_REG:
             r, k = self.r(i.reg_name(t.reg)); self.e(f'move.l %{r},%d7')
         else:
             self.load_mem(i, t, 'd7', 4)
+        if retv is not None: self.e(f'pea {hexs(retv)}')       # return address pushed AFTER the target operand was evaluated
         self.e(f'sub.l #{hexs(self.base)},%d7')
         self.e(f'lea {self.dispatch},%a0')
         self.e('move.l (%a0,%d7.l*4),%a0')
-        self.e(f'{how} (%a0)')
+        self.e('jmp (%a0)')
 
     def x_ret(self, i, live, pfx):
-        if i.operands:
-            self.e(f'rtd #{i.operands[0].imm}')
-        else:
-            self.e('rts')
+        self.e('move.w %ccr,28(%a6)')              # flags (e.g. CF returned by DOS-style wrappers) survive ret
+        self.e('move.l (%sp)+,%d7')
+        for l in swap32('d7'): self.e(l)
+        if i.operands: self.e(f'lea {i.operands[0].imm}(%sp),%sp')
+        self.e(f'sub.l #{hexs(self.base)},%d7')
+        self.e(f'lea {self.dispatch},%a0')
+        self.e('move.l (%a0,%d7.l*4),%a0')
+        self.e('move.w 28(%a6),%ccr')
+        self.e('jmp (%a0)')
 
     def x_iretd(self, i, live, pfx):
-        self.e('move.l (%sp)+,%a0'); self.e('addq.l #8,%sp'); self.e('jmp (%a0)')
+        self.e('jbra rt_iretd')
     x_iret = x_iretd
 
     def x_jcc(self, i, live, pfx):
