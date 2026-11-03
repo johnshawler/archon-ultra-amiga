@@ -380,10 +380,11 @@ u32 rt_c_trace(u32 addr, struct regs *r) {
       for (int k = 0; k < nwp; k++) if (wp[k] == addr && hits[k]++ < 400) plat_log("WATCH %x idx=%ld eax=%08x ecx=%08x edx=%08x ebx=%08x ebp=%08x esi=%08x edi=%08x\n", addr, trn, r->eax, r->ecx, r->edx, r->ebx, r->ebp, r->esi, r->edi); }
     { static long regn = -2; static FILE *fr; if (regn == -2) { const char *e = getenv("REGTRACE"); regn = e ? atol(e) : -1; if (regn > 0) fr = fopen("itrace_ours.log", "w"); }
       if (trn < regn) fprintf(fr, "%08x %08x %08x %08x %08x %08x %08x %08x\n", addr, r->eax, r->ecx, r->edx, r->ebx, r->ebp, r->esi, r->edi); else if (fr && trn == regn) { fclose(fr); fr = 0; } }
-    if (trn < 30000000) { u32 v = addr - XL_BASE; fwrite(&v, 4, 1, ftr); }
+    static long lockn = -1; if (lockn < 0) { const char *e = getenv("LOCKN"); lockn = e ? atol(e) : 30000000; }
+    if (trn < lockn) { u32 v = addr - XL_BASE; fwrite(&v, 4, 1, ftr); }
     trn++; rt_cycles += 1; hw_set_exact(rt_cycles / 30.0);
     if ((trn & 63) == 0) hw_advance((u32)(trn / 30));
-    if (trn == 30000000) { fflush(ftr); plat_exit(0); }
+    if (trn == lockn) { fflush(ftr); plat_exit(0); }
     return 0;
 }
 
