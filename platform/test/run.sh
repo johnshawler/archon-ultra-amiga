@@ -9,6 +9,6 @@ export OUT=$out
 xvfb-run -a -s "-screen 0 1024x768x24" bash -c '
   fs-uae "'"$cfg"'" >"'"$out"'/fsuae.log" 2>&1 & P=$!
   t=0
-  for s in '"$*"'; do sleep $((s-t)); t=$s; import -window root "'"$out"'/shot_$s.png"; done
+  for s in '"$*"'; do sleep $((s-t)); t=$s; for k in $(echo "$XKEYS" | tr "," "\n" | grep "^$s:" | cut -d: -f2); do xdotool key $k; sleep 0.3; done; import -window root "'"$out"'/shot_$s.png"; done
   kill $P 2>/dev/null; sleep 1
 '
