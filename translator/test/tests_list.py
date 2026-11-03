@@ -31,4 +31,9 @@ T += [('div ebx', 0), ('idiv ecx', 0)]
 T += ['push ax', 'push bx', 'push word ptr [esi]', 'push 0x1234', 'pop bx', 'pop word ptr [esi]', 'shl ch, cl', 'shr bh, cl', 'sar ch, cl']
 T += ['push eax', 'push 0x12345678', 'push dword ptr [esi]', 'pop ebx', 'pop dword ptr [esi]', 'leave', 'pushal', 'popal']
 T += ['setne al', 'sete bl', 'setg cl', 'sete byte ptr [esi]']
+for op in ('adc', 'sbb'):
+    T += [f'{op} al, ah', f'{op} ah, bl', f'{op} ch, dh', f'{op} ah, 5', f'{op} dl, ch', f'{op} ah, byte ptr [esi]', f'{op} bh, bh']
+T += [('imul bh', CF | OF), ('imul bl', CF | OF), ('imul cx', CF | OF), ('imul word ptr [esi]', CF | OF), ('imul byte ptr [esi]', CF | OF),
+      ('mul bl', CF | OF), ('mul bh', CF | OF), ('mul cx', CF | OF)]
+T += [('div bl', 0), ('div cx', 0), ('idiv bl', 0), ('idiv cx', 0)]
 TESTS = T

@@ -217,7 +217,12 @@ static void sb_advance(void) {
 /* ---- VGA retrace */
 u32 vga_vretrace_state(void) {
     u32 frame_us = 14268, line_us = 32;
-    u32 t = now % frame_us; u32 line = t / line_us, in_line = t % line_us;
+#ifndef HOSTED
+    u32 t = plat_time_us() % frame_us;                 /* the status port is polled in tight loops: use the live clock, not the one cached at the last poll */
+#else
+    u32 t = now % frame_us;
+#endif
+    u32 line = t / line_us, in_line = t % line_us;
     u32 r = 0;
     if (line >= 412 && line < 414) r |= 8;
     if (r || in_line >= 26) r |= 1;

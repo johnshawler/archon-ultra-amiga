@@ -204,6 +204,7 @@ def main(exe, seeds_path, outs, stats=True):
         except Unsupported as e:
             key = i.mnemonic + ' ' + i.op_str
             (unsup_trusted if a in trusted else unsup)[i.mnemonic] += 1
+            if a in trusted: print('UNSUPPORTED (executed) %x: %s %s [%s]' % (a, i.mnemonic, i.op_str, e), file=sys.stderr)
             lines.append(f'\tjbsr rt_unimpl\n\t.long 0x{a:x}')
         except Exception as e:
             unsup_trusted['EXC ' + i.mnemonic + ' ' + str(e)[:40]] += 1

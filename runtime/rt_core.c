@@ -87,8 +87,9 @@ u32 rt_set_eflags(u32 v) {
     u32 c = 0; if (v & 1) c |= CCR_C; if (v & 0x40) c |= CCR_Z; if (v & 0x80) c |= CCR_N; if (v & 0x800) c |= CCR_V; return c;
 }
 
-void rt_c_unimpl(u32 where) { plat_log("rt: UNIMPLEMENTED instruction at x86 %x (or bad jump)\n", where); plat_exit(3); }
-void rt_c_badtarget(u32 off, u32 ret) { plat_log("rt: indirect jump/call to unknown x86 target %x (native return %x)\n", off + XL_BASE, ret); plat_exit(4); }
+u32 rt_dbg_exit_code, rt_dbg_exit_a, rt_dbg_exit_b;
+void rt_c_unimpl(u32 where) { rt_dbg_exit_code = 3; rt_dbg_exit_a = where; plat_log("rt: UNIMPLEMENTED instruction at x86 %x (or bad jump)\n", where); plat_exit(3); }
+void rt_c_badtarget(u32 off, u32 ret) { rt_dbg_exit_code = 4; rt_dbg_exit_a = off + XL_BASE; rt_dbg_exit_b = ret; plat_log("rt: indirect jump/call to unknown x86 target %x (native return %x)\n", off + XL_BASE, ret); plat_exit(4); }
 
 /* ---- ports */
 #ifdef HOSTED

@@ -275,7 +275,7 @@ static void input_poll(void)
 static u32 shown_gen = 0xFFFFFFFFu;
 #ifdef DEBUGBAR
 extern u32 dbg_pc; extern u32 hw_dbg1(void), hw_dbg2(void);
-extern u32 rt_dbg_hist[32];
+extern u32 rt_dbg_hist[32], rt_dbg_exit_code, rt_dbg_exit_a, rt_dbg_exit_b;
 extern u32 rt_dbg_last, rt_dbg_nint, rt_dbg_irq, rt_dbg_a, rt_dbg_b, rt_dbg_n5;
 static u8 dbgrows[32 * 320] __attribute__((aligned(4)));
 static u32 polls;
@@ -307,7 +307,7 @@ static void dbg_bar_draw(void)
     }
     dbg_hex(8, dbg_pc - boot_fast); dbg_hex(60, polls); dbg_hex(112, vbl_count); dbg_hex(164, plat_time_us());
     dbg_hex(216, (rt_dbg_last << 16) | (rt_dbg_nint & 0xFFFF)); dbg_hex(268, dbg_disk_word());
-    dbg_hex2(8, 8, dbg_n_ports); dbg_hex2(60, 8, dbg_n_ciab); dbg_hex2(112, 8, dbg_n_aud); dbg_hex2(164, 8, dbg_n_def); dbg_hex2(216, 8, rt_dbg_hist[(rt_dbg_nint - 1) & 31]);
+    dbg_hex2(8, 8, dbg_n_ports); dbg_hex2(60, 8, dbg_n_ciab); dbg_hex2(112, 8, dbg_n_aud); dbg_hex2(164, 8, rt_dbg_exit_code); dbg_hex2(216, 8, rt_dbg_exit_a); dbg_hex2(268, 8, rt_dbg_exit_b ? rt_dbg_exit_b - boot_fast : 0);
     for (unsigned y = 0; y < 32; y++) { c2p_row320(dbgrows + y * 320, buf[0] + (200 + y) * ROW_BYTES); c2p_row320(dbgrows + y * 320, buf[1] + (200 + y) * ROW_BYTES); }
 }
 #endif

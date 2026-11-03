@@ -207,7 +207,7 @@ class X:
         # high-byte register as destination of a read-modify-write op: rotate the parent so it becomes a low byte
         if m in ('inc', 'dec', 'not', 'neg', 'shl', 'shr', 'sar', 'sal', 'rol', 'ror', 'add', 'sub', 'and', 'or', 'xor', 'adc', 'sbb', 'cmp', 'test', 'mov') or m.startswith('set'):
             d0 = i.operands[0] if i.operands else None
-            if d0 is not None and d0.type == X86_OP_REG and i.reg_name(d0.reg) in R8H:
+            if d0 is not None and m not in ('adc', 'sbb') and d0.type == X86_OP_REG and i.reg_name(d0.reg) in R8H:
                 hn = i.reg_name(d0.reg); parent = R8H[hn]
                 lowname = {'ah': 'al', 'ch': 'cl', 'dh': 'dl', 'bh': 'bl'}[hn]
                 if m in ('shl', 'shr', 'sar', 'sal') and len(i.operands) > 1 and i.operands[1].type == X86_OP_REG and i.reg_name(i.operands[1].reg) == 'cl' and parent == 'd1':
@@ -690,8 +690,26 @@ class X:
     def setx_from_c(self):
         self.e('scs 44(%a6)'); self.e('neg.b 44(%a6)')
 
+    def adcsbb_h(self, i, live, op):
+        """byte adc/sbb where the destination register and/or the source register is AH/CH/DH/BH."""
+        d, s = i.operands
+        self.e('scs 44(%a6)')                                   # keep the carry while the operand is fetched
+        if s.type == X86_OP_IMM: self.e(f'move.b #{hexs(s.imm & 0xFF)},%d7')
+        elif s.type == X86_OP_MEM: self.load_mem(i, s, 'd7', 1)
+        else:
+            sr, sk = self.r(i.reg_name(s.reg))
+            if sk == 'h': self.e(f'move.w %{sr},%d7'); self.e('lsr.w #8,%d7')
+            else: self.e(f'move.b %{sr},%d7')
+        self.e('neg.b 44(%a6)')                                 # X = carry
+        dr, k = self.r(i.reg_name(d.reg))
+        if k == 'h': self.e(f'rol.w #8,%{dr}')                  # (X is not affected)
+        self.e('ori.b #4,%ccr'); self.e(f'{op}.b %d7,%{dr}')
+        if k == 'h': self.e('move.w %ccr,28(%a6)'); self.e(f'rol.w #8,%{dr}'); self.e('move.w 28(%a6),%ccr')
+
     def adcsbb(self, i, live, op):
         d, s = i.operands; size = d.size; sz = SZ[size]
+        if size == 1 and d.type == X86_OP_REG and (self.r(i.reg_name(d.reg))[1] == 'h' or (s.type == X86_OP_REG and self.r(i.reg_name(s.reg))[1] == 'h')):
+            return self.adcsbb_h(i, live, op)
         self.setx_from_c()
         if d.type == X86_OP_REG:
             dr, k = self.r(i.reg_name(d.reg))
@@ -806,7 +824,19 @@ class X:
         ops = i.operands
         if len(ops) == 1:
             s = ops[0]; size = s.size
-            if size != 4: raise Unsupported('imul1 8/16')
+            if size == 1:
+                self.byte_src_to_ctx(i, s, signed=True)
+                self.e('move.b %d0,%d7'); self.e('ext.w %d7'); self.e('muls.w 32(%a6),%d7'); self.e('move.w %d7,%d0')
+                if live & (CF | OF):
+                    self.e('move.w %d7,32(%a6)'); self.e('move.b 33(%a6),%d7'); self.e('ext.w %d7'); self.e('cmp.w 32(%a6),%d7'); self.e('beq 8f')
+                    self.e('ori.b #3,%ccr'); self.e('bra 9f'); self.e('8: andi.b #0x1c,%ccr'); self.e('9:')
+                return
+            if size == 2:
+                if s.type == X86_OP_MEM: self.load_mem(i, s, 'd7', 2); self.e('move.w %d7,32(%a6)'); sv = '32(%a6)'
+                else: sv = '%' + self.r(i.reg_name(s.reg))[0]
+                self.e('move.w %d0,%d7'); self.e(f'muls.w {sv},%d7'); self.e('move.w %d7,%d0'); self.e('swap %d7'); self.e('move.w %d7,%d2'); self.e('swap %d7')
+                self.imul16_flags(live)
+                return
             sv = self.src_val(i, s, 4, 'd7')
             self.e(f'muls.l {sv},%d2:%d0')
             if live & (CF | OF):
@@ -915,7 +945,17 @@ class X:
         s = i.operands[0]
         if s.size == 4:
             sv = self.src_val(i, s, 4, 'd7'); self.e(f'divs.l {sv},%d2:%d0'); return
-        raise Unsupported('idiv 8/16')
+        if s.size == 2:
+            if s.type == X86_OP_MEM:
+                self.load_mem(i, s, 'd7', 2); self.e('move.w %d7,32(%a6)'); dv = '32(%a6)'
+            else: dv = '%' + self.r(i.reg_name(s.reg))[0]
+            self.e('movem.l %d6,36(%a6)')
+            self.e('move.w %d2,%d6'); self.e('swap %d6'); self.e('move.w %d0,%d6'); self.e(f'divs.w {dv},%d6')
+            self.e('move.w %d6,%d0'); self.e('swap %d6'); self.e('move.w %d6,%d2'); self.e('movem.l 36(%a6),%d6')
+            return
+        self.byte_src_to_ctx(i, s, signed=True)
+        self.e('move.w %d0,%d7'); self.e('ext.l %d7'); self.e('divs.w 32(%a6),%d7')
+        self.e('move.b %d7,%d0'); self.e('swap %d7'); self.e('rol.w #8,%d0'); self.e('move.b %d7,%d0'); self.e('rol.w #8,%d0')
 
     def mul32(self, i, live):
         s = i.operands[0]
