@@ -159,12 +159,14 @@ static void sb_start(int is16, int autoinit, u8 mode, u32 len) {
     sb.is16 = is16; sb.autoinit = autoinit; sb.stereo = (mode >> 5) & 1; sb.sign = (mode >> 4) & 1;
     sb.blocklen = len + 1; sb.active = 1; sb.pos_bytes = 0;
     int ch = is16 ? 5 : 1;
+    if (is16 && dma[5].count == 0 && dma[1].count != 0) ch = 1;          /* the game programs the 8-bit controller (channel 1) for its 16-bit output, as the reference run shows */
     sb.dma_buf = (dma[ch].page << 16) | dma[ch].addr; sb.dma_len = dma[ch].count + 1;
-    if (is16) { sb.dma_buf = ((dma[5].page & 0xFE) << 16) | (dma[5].addr << 1); sb.dma_len = (dma[5].count + 1) * 2; }
+    if (is16 && ch == 5) { sb.dma_buf = ((dma[5].page & 0xFE) << 16) | (dma[5].addr << 1); sb.dma_len = (dma[5].count + 1) * 2; }
     u32 samples = sb.blocklen;            /* for 16-bit commands length is in samples (words) */
     u32 frames = sb.stereo ? samples / 2 : samples; if (!frames) frames = 1;
     sb.irq_period_us = (u32)((u64)frames * 1000000u / (sb.rate ? sb.rate : 11025));
     sb.next_irq_us = now + sb.irq_period_us;
+    plat_log("hw: sb start is16=%d auto=%d stereo=%d rate=%u blocklen=%u dma=%x len=%u period=%u now=%u\n", is16, autoinit, sb.stereo, sb.rate, sb.blocklen, sb.dma_buf, sb.dma_len, sb.irq_period_us, now);
 }
 static void sb_cmd_done(void) {
     u8 c = sb.cmd; u8 *a = sb.args;
@@ -187,6 +189,7 @@ static int sb_cmd_args(u8 c) {
     return 0;
 }
 static void sb_dsp_write(u8 v) {
+    { static int n; if (n++ < 40) plat_log("hw: dsp write %02x\n", v); }
     if (sb.argn < 0) { sb.cmd = v; sb.argn = 0; if (sb_cmd_args(v) == 0) {
         switch (v) {
         case 0xE1: sb_put(4); sb_put(5); break;
@@ -207,6 +210,7 @@ static void sb_advance(void) {
         /* push this block's audio to the platform */
         u32 bytes = sb.blocklen * (sb.is16 ? 2 : 1);
         u32 off = sb.pos_bytes % (sb.dma_len ? sb.dma_len : 1);
+        { static int np; if (np++ < 5) plat_log("hw: sb push off=%u bytes=%u dma_len=%u now=%u\n", off, bytes, sb.dma_len, now); }
         if (off + bytes <= sb.dma_len) plat_audio_push(WIN + sb.dma_buf + off, bytes, sb.rate, sb.is16, sb.stereo, sb.sign);
         sb.pos_bytes += bytes;
         irq_raise(SB_IRQ); sb.mixer[0x82] |= sb.is16 ? 2 : 1;

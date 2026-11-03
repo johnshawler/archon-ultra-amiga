@@ -630,6 +630,7 @@ void amiga_main(void)
     u32 avail = boot_fast + boot_fast_size - (u32)w;
     rt_heap_end = avail - 0x10000; if (rt_heap_end > 0xFFF000u) rt_heap_end = 0xFFF000u;
     rt_heap_reserve = 0x40000;
+    { u32 *z = (u32 *)w; u32 words = (rt_heap_end + 0x1000u) / 4; for (u32 i = 0; i < words; i++) z[i] = 0; }      /* fast RAM is not cleared by the system */
     for (u32 i = 0; i < obj1_len; i++) w[OBJ1_BASE + i] = obj1_data[i];
     for (u32 i = 0; i < obj2_len; i++) w[OBJ2_BASE + i] = obj2_data[i];
     for (u32 i = 0; i < obj3_len; i++) w[OBJ3_BASE + i] = obj3_data[i];

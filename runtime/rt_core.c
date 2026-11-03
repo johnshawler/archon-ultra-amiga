@@ -263,6 +263,7 @@ static int int31(struct regs *r) {
     case 0x0007: { u32 s = r->ebx & 0xFFFF; u32 b = ((r->ecx & 0xFFFF) << 16) | (r->edx & 0xFFFF); if (s >= 0x1d0) ldt_base[(s - 0x1d0) >> 3] = b; return 0; }
     case 0x0008: return 0; case 0x0009: return 0; case 0x000B: return 0; case 0x000C: return 0;
     case 0x0100: { u32 n = r->ebx & 0xFFFF; u32 p = (b_ptr + n <= b_end) ? b_ptr * 16u : 0; if (p) b_ptr += n + 1; if (!p) { set_cf(1, r, 8); r->ebx = (r->ebx & 0xFFFF0000u) | (b_end - b_ptr); return 1; }
+        for (u32 i = 0; i < n * 16u; i++) WIN[p + i] = 0;                    /* fresh conventional memory is zero in the reference (DOS/4GW) */
         { u32 sel = new_sel(p); if (ndosrec < 64) { dosrec[ndosrec].sel = sel; dosrec[ndosrec].seg = p >> 4; dosrec[ndosrec].n = n; ndosrec++; }
           r->eax = (r->eax & ~0xFFFF) | (p >> 4); r->edx = (r->edx & ~0xFFFF) | sel; } return 0; }
     case 0x0101: { u32 sel = r->edx & 0xFFFF;
