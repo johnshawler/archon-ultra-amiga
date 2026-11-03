@@ -94,6 +94,7 @@ static u16 vstart;
 
 /* ------------------------------------------------------------------------------------------- exceptions */
 static u32 vectors[256];
+u32 dbg_conv_total;
 u32 dbg_n_ports, dbg_n_ciab, dbg_n_aud, dbg_n_def;
 void plat_isr_default_c(void) { dbg_n_def++; R16(INTREQ) = 0x7FFF; }
 /* crash screen: eight hex digits per line in a one-plane hires picture (vector, SR, PC, fault address / format word, then 8 stack longs) */
@@ -307,7 +308,7 @@ static void dbg_bar_draw(void)
     }
     dbg_hex(8, dbg_pc - boot_fast); dbg_hex(60, polls); dbg_hex(112, vbl_count); dbg_hex(164, plat_time_us());
     dbg_hex(216, (rt_dbg_last << 16) | (rt_dbg_nint & 0xFFFF)); dbg_hex(268, dbg_disk_word());
-    dbg_hex2(8, 8, dbg_n_ports); dbg_hex2(60, 8, dbg_n_ciab); dbg_hex2(112, 8, dbg_n_aud); dbg_hex2(164, 8, rt_dbg_exit_code); dbg_hex2(216, 8, rt_dbg_exit_a); dbg_hex2(268, 8, rt_dbg_exit_b ? rt_dbg_exit_b - boot_fast : 0);
+    dbg_hex2(8, 8, dbg_n_ports); dbg_hex2(60, 8, dbg_n_ciab); dbg_hex2(112, 8, dbg_n_aud); dbg_hex2(164, 8, rt_dbg_exit_code); dbg_hex2(216, 8, dbg_conv_total); dbg_hex2(268, 8, rt_dbg_exit_b ? rt_dbg_exit_b - boot_fast : 0);
     for (unsigned y = 0; y < 32; y++) { c2p_row320(dbgrows + y * 320, buf[0] + (200 + y) * ROW_BYTES); c2p_row320(dbgrows + y * 320, buf[1] + (200 + y) * ROW_BYTES); }
 }
 #endif
@@ -347,6 +348,7 @@ static void display_update(void)
         else c2p_row320(src, dst + y * ROW_BYTES);
     }
     if (!incr) { for (u32 i = 0; i < sizeof vga_dirty; i++) vga_dirty[i] &= (u8)~mask; }
+    dbg_conv_total++;
     conv_valid[bb] = 1; conv_start[bb] = start; conv_pitch[bb] = pitch;
 #ifdef DEBUGBAR
     for (unsigned y = 0; y < 32; y++) c2p_row320(dbgrows + y * 320, dst + (200 + y) * ROW_BYTES);
@@ -459,27 +461,28 @@ void plat_vsync(u32 frame) { (void)frame; }
 
 /* ------------------------------------------------------------------------------------------- polling hook called by the runtime */
 #ifdef TESTKEYS
-/* test-only scripted input (game time in ms since start, PC scancode): D = down, space = fire (Light keyboard map) */
-static const struct { u32 ms; u8 sc; } tk[] = {
-    {70000,0x20},{70200,0xA0},{70600,0x20},{70800,0xA0},{71200,0x20},{71400,0xA0},{71800,0x20},{72000,0xA0},
-    {72400,0x20},{72600,0xA0},{73000,0x20},{73200,0xA0},{73600,0x39},{73800,0xB9},
+/* test-only scripted mouse (game time ms, x 0..639, y 0..199, buttons): Light=Computer, Dark=Computer, START */
+static const struct { u32 ms; u16 x, y; u8 b; } tm[] = {
+    {70000,252,61,0},{70500,252,61,1},{71000,252,61,0},
+    {71500,398,61,0},{72000,398,61,1},{72500,398,61,0},
+    {73000,248,130,0},{73500,248,130,1},{74000,248,130,0},
 };
-static unsigned tk_i;
 static void test_keys(void)
 {
-    u32 ms = plat_time_us() / 1000;
-    while (tk_i < sizeof tk / sizeof tk[0] && ms >= tk[tk_i].ms) { hw_key(tk[tk_i].sc); tk_i++; }
+    u32 ms = plat_time_us() / 1000; int k = -1;
+    for (unsigned i = 0; i < sizeof tm / sizeof tm[0]; i++) if (ms >= tm[i].ms) k = (int)i;
+    if (k >= 0) rt_mouse_set(tm[k].x, tm[k].y, tm[k].b);
 }
 #endif
 void plat_poll(void)
 {
-#ifdef TESTKEYS
-    test_keys();
-#endif
 #ifdef DEBUGBAR
     polls++;
 #endif
     input_poll();
+#ifdef TESTKEYS
+    test_keys();
+#endif
     if (vbl_count != shown_vbl) { shown_vbl = vbl_count; display_update(); }
     else if (!flip_pending) display_update();
 }
