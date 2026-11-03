@@ -33,6 +33,7 @@ static int pic_next(void) {            /* returns vector or -1 */
     return -1;
 }
 u32 hw_dbg1(void) { return (irr[0] << 24) | (irr[1] << 16) | (isr[0] << 8) | isr[1]; }
+static u32 sb_write_busy;
 static u8 cmos_idx, cmos[128];
 u32 hw_dbg2(void) { return (imr[0] << 24) | (imr[1] << 16) | (cmos[0x0B] << 8) | cmos[0x0A]; }
 int hw_irq_pending(void) { return pic_next() >= 0; }
@@ -264,7 +265,7 @@ int hw_port_out(u32 port, u32 v, int size) {
     /* Sound Blaster 0x220 */
     if (port >= 0x220 && port <= 0x22F) {
         switch (port & 0xF) {
-        case 0x6: if (v == 0) { if (sb.resetting) { sb.nready = 0; sb_put(0xAA); sb.active = 0; sb.argn = -1; } sb.resetting = 0; } else sb.resetting = 1; return 1;
+        case 0x6: if (v & 1) { if (!sb.resetting) sb_write_busy = 0; } if (v == 0) { if (sb.resetting) { sb.nready = 0; sb_put(0xAA); sb.active = 0; sb.argn = -1; } sb.resetting = 0; } else sb.resetting = 1; return 1;
         case 0xC: sb_dsp_write(v); return 1;
         case 0x4: sb.mixer_idx = v; return 1;
         case 0x5: sb.mixer[sb.mixer_idx] = v; return 1;
@@ -297,7 +298,7 @@ u32 hw_port_in(u32 port, int size, int *h) {
         switch (port & 0xF) {
         case 0xA: return sb_get();
         case 0xE: return sb.nready ? 0x80 : 0x00;
-        case 0xC: return 0x00;
+        case 0xC: if (sb.resetting) return 0xFF; sb_write_busy++; return (sb_write_busy & 8) ? 0xFF : 0x7F;       /* DOSBox: alternating 'write buffer busy' (the game polls bit 7 before every DSP write) */
         case 0x5: return sb.mixer[sb.mixer_idx];
         case 0x4: return sb.mixer_idx;
         case 0xF: sb.mixer[0x82] &= ~2; return 0;
