@@ -95,6 +95,7 @@ static u16 vstart;
 /* ------------------------------------------------------------------------------------------- exceptions */
 static u32 vectors[256];
 u32 dbg_conv_total;
+extern u32 dbg_aud_pushes, dbg_aud_peak;
 u32 dbg_n_ports, dbg_n_ciab, dbg_n_aud, dbg_n_def;
 void plat_isr_default_c(void) { dbg_n_def++; R16(INTREQ) = 0x7FFF; }
 /* crash screen: eight hex digits per line in a one-plane hires picture (vector, SR, PC, fault address / format word, then 8 stack longs) */
@@ -308,7 +309,7 @@ static void dbg_bar_draw(void)
     }
     dbg_hex(8, dbg_pc - boot_fast); dbg_hex(60, polls); dbg_hex(112, vbl_count); dbg_hex(164, plat_time_us());
     dbg_hex(216, (rt_dbg_last << 16) | (rt_dbg_nint & 0xFFFF)); dbg_hex(268, dbg_disk_word());
-    dbg_hex2(8, 8, dbg_n_ports); dbg_hex2(60, 8, dbg_n_ciab); dbg_hex2(112, 8, dbg_n_aud); dbg_hex2(164, 8, rt_dbg_exit_code); dbg_hex2(216, 8, dbg_conv_total); dbg_hex2(268, 8, rt_dbg_exit_b ? rt_dbg_exit_b - boot_fast : 0);
+    dbg_hex2(8, 8, dbg_n_ports); dbg_hex2(60, 8, dbg_n_ciab); dbg_hex2(112, 8, dbg_n_aud); dbg_hex2(164, 8, rt_dbg_exit_code); dbg_hex2(216, 8, dbg_conv_total); dbg_hex2(268, 8, (dbg_aud_pushes << 16) | dbg_aud_peak);
     for (unsigned y = 0; y < 32; y++) { c2p_row320(dbgrows + y * 320, buf[0] + (200 + y) * ROW_BYTES); c2p_row320(dbgrows + y * 320, buf[1] + (200 + y) * ROW_BYTES); }
 }
 #endif
@@ -456,7 +457,39 @@ long plat_file_read(long h, void *buf_, u32 n)
 }
 
 /* ------------------------------------------------------------------------------------------- audio (set up in snd.c later) */
-void plat_audio_push(const u8 *d, u32 n, u32 rate, int is16, int stereo, int sign) { (void)d; (void)n; (void)rate; (void)is16; (void)stereo; (void)sign; }
+/* Paula: ring buffers (channel 0 = left, channel 1 = right) that loop forever; the game's Sound Blaster blocks are converted to signed 8-bit and
+   written just ahead of the read position, which is derived from the clock (Paula has no readable pointer). */
+#define AUD_N 8192u
+static u32 aud_wp, aud_started, aud_rate, aud_t0_us;
+u32 dbg_aud_pushes, dbg_aud_peak;
+void plat_audio_push(const u8 *d, u32 n, u32 rate, int is16, int stereo, int sign)
+{
+    if (!rate) return;
+    s8 *L = (s8 *)(chip + CHIP_AUD), *Rr = (s8 *)(chip + CHIP_AUD + AUD_N);
+    u32 now = plat_time_us();
+    if (!aud_started || rate != aud_rate) {
+        aud_rate = rate; aud_started = 1; aud_t0_us = now; aud_wp = 1536;
+        u32 period = ((is_pal ? 3546895u : 3579545u) + rate / 2) / rate; if (period < 124) period = 124;
+        for (unsigned c = 0; c < 2; c++) {
+            R32(AUDx(c, 0)) = (u32)chip + CHIP_AUD + c * AUD_N; R16(AUDx(c, 4)) = AUD_N / 2; R16(AUDx(c, 6)) = (u16)period; R16(AUDx(c, 8)) = 64;
+        }
+        for (u32 i = 0; i < AUD_N; i++) { L[i] = 0; Rr[i] = 0; }
+        R16(DMACON) = SETBIT | 0x0003;                       /* AUD0EN | AUD1EN */
+    }
+    u32 us = now - aud_t0_us;
+    u32 ridx = (((us / 1000000u) * rate) + ((((us % 1000000u) / 1000u) * rate) / 1000u)) % AUD_N;
+    u32 ahead = (aud_wp - ridx) & (AUD_N - 1);
+    if (ahead < 256 || ahead > AUD_N - 1024) aud_wp = (ridx + 1536) & (AUD_N - 1);     /* under/overrun: resynchronise */
+    dbg_aud_pushes++;
+    u32 bps = (is16 ? 2u : 1u) * (stereo ? 2u : 1u), frames = n / bps;
+    for (u32 i = 0; i < frames; i++, d += bps) {
+        s8 l, r;
+        if (is16) { l = (s8)(sign ? d[1] : d[1] ^ 0x80); r = stereo ? (s8)(sign ? d[3] : d[3] ^ 0x80) : l; }
+        else { l = (s8)(sign ? d[0] : d[0] ^ 0x80); r = stereo ? (s8)(sign ? d[1] : d[1] ^ 0x80) : l; }
+        { u32 a = (u32)(l < 0 ? -l : l); if (a > dbg_aud_peak) dbg_aud_peak = a; }
+        L[aud_wp] = l; Rr[aud_wp] = r; aud_wp = (aud_wp + 1) & (AUD_N - 1);
+    }
+}
 void plat_vsync(u32 frame) { (void)frame; }
 
 /* ------------------------------------------------------------------------------------------- polling hook called by the runtime */
