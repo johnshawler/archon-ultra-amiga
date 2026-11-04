@@ -210,7 +210,7 @@ static void sb_advance(void) {
         /* push this block's audio to the platform */
         u32 bytes = sb.blocklen * (sb.is16 ? 2 : 1);
         u32 off = sb.pos_bytes % (sb.dma_len ? sb.dma_len : 1);
-        { static int np; if (np++ < 5) plat_log("hw: sb push off=%u bytes=%u dma_len=%u now=%u\n", off, bytes, sb.dma_len, now); }
+        { static int np; if (np++ < 5) { const u8 *q = WIN + sb.dma_buf + off; plat_log("hw: sb push off=%u bytes=%u dma_len=%u now=%u buf=%x data=%02x%02x%02x%02x %02x%02x%02x%02x\n", off, bytes, sb.dma_len, now, sb.dma_buf, q[0], q[1], q[2], q[3], q[4], q[5], q[6], q[7]); } }
         if (off + bytes <= sb.dma_len) plat_audio_push(WIN + sb.dma_buf + off, bytes, sb.rate, sb.is16, sb.stereo, sb.sign);
         sb.pos_bytes += bytes;
         irq_raise(SB_IRQ); sb.mixer[0x82] |= sb.is16 ? 2 : 1;
