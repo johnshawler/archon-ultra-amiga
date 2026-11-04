@@ -15,6 +15,8 @@ entry:                          | offset 12
     .long   0x41524348          | offset 16: marker 'ARCH'
 payload_len:
     .long   0                   | offset 20: patched
+payload_off:
+    .long   1024                | offset 24: absolute byte offset of the payload on the boot device (1024 on the ADF; patched for the HDF)
 
 start:
     move.l  %a1,%a4             | a4 = IO request
@@ -60,7 +62,8 @@ rd: move.l  %d7,%d0
     move.w  #2,28(%a4)          | io_Command = CMD_READ
     move.l  %d2,36(%a4)         | io_Length
     move.l  %d6,40(%a4)         | io_Data
-    lea     1024(%d3),%a0
+    move.l  payload_off(%pc),%a0
+    lea     (%a0,%d3.l),%a0
     move.l  %a0,44(%a4)         | io_Offset
     move.l  %a4,%a1
     jsr     -456(%a6)           | DoIO
