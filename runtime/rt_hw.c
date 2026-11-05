@@ -65,6 +65,11 @@ static void pic_out(int c, u32 port, u8 v) {
 }
 
 /* ---- PIT */
+#ifdef HOSTED
+#define LIVE_US() now
+#else
+#define LIVE_US() plat_time_us()      /* the game phase-locks its timer to the retrace by reading the counter right after the retrace bit changes: both must come from the same live clock */
+#endif
 struct pit {
 #ifdef HOSTED
  double start_d;
@@ -87,7 +92,7 @@ static u32 pit_count(int ch) {
 #else
 static u32 pit_count(int ch) {
     struct pit *p = &pit[ch]; u32 rl = p->reload ? p->reload : 65536;
-    u64 ticks = ((u64)(u32)(now - p->start_us) * 1193182u + 999999u) / 1000000u;      /* integer version of the same maths */
+    u64 ticks = ((u64)(u32)(LIVE_US() - p->start_us) * 1193182u + 999999u) / 1000000u;      /* integer version of the same maths */
     if (p->mode == 0 || p->mode == 4) {
         if (ticks > rl) { u32 t = (u32)((ticks - rl) % 65536u); return (0xffffu - t) & 0xFFFF; }
         return (u32)(rl - (u32)ticks) & 0xFFFF;
@@ -103,9 +108,9 @@ static void pit_out(u32 port, u8 v) {
         pit[ch].rw = (v >> 4) & 3; pit[ch].mode = (v >> 1) & 7; pit[ch].wr_state = 0; return;
     }
     int ch = port - 0x40; struct pit *p = &pit[ch];
-    if (p->rw == 1) { p->reload = v; p->start_us = now; HOSTED_START_D }
-    else if (p->rw == 2) { p->reload = v << 8; p->start_us = now; HOSTED_START_D }
-    else { if (!p->wr_state) { p->wr_lo = v; p->wr_state = 1; } else { p->reload = (v << 8) | p->wr_lo; p->wr_state = 0; p->start_us = now; HOSTED_START_D if (ch == 0) p->phase_us = now; } }
+    if (p->rw == 1) { p->reload = v; p->start_us = LIVE_US(); HOSTED_START_D }
+    else if (p->rw == 2) { p->reload = v << 8; p->start_us = LIVE_US(); HOSTED_START_D }
+    else { if (!p->wr_state) { p->wr_lo = v; p->wr_state = 1; } else { p->reload = (v << 8) | p->wr_lo; p->wr_state = 0; p->start_us = LIVE_US(); HOSTED_START_D if (ch == 0) p->phase_us = LIVE_US(); } }
 }
 static u32 pit_in(u32 port) {
     int ch = port - 0x40; struct pit *p = &pit[ch];
