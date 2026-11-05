@@ -899,5 +899,5 @@ void trace_ior(Bitu port,Bitu val){
   if(!on||!g_cov||!ite_armed) return;
   if(!(port==0x42||port==0x201||port==0x3da||port==0x71||port==0x60||port==0x61||port==0x22a||port==0x22e||port==0x40||port==0x41)) return;
   if(!f){ char b[600]; sprintf(b,"%s/portreads.txt",g_dir); f=fopen(b,"w"); }
-  if(n++<3000000){ fprintf(f,"%lld %x %x\n",g_ite_idx,(unsigned)port,(unsigned)val&0xff); if(n%1000==0) fflush(f);}
+  if(n++<4000000000u){ fprintf(f,"%lld %x %x\n",g_ite_idx,(unsigned)port,(unsigned)val&0xff); if(n%1000==0) fflush(f);}
 }
