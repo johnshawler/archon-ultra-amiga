@@ -5451,11 +5451,15 @@ rt_repne_outsd:
 	move.w 136(%a6),%ccr
 	jmp (%a0)
 
-	.globl rt_poll
+	.globl rt_poll, rt_dbg_pc
+	.data
+rt_dbg_pc:	.long 0
+	.text
 rt_poll:
 	move.w %ccr,136(%a6)
 	movem.l %d0-%d6,96(%a6)
-1:	move.l %sp,%a4
+1:	move.l (%sp),rt_dbg_pc
+	move.l %sp,%a4
 	lea rt_cstack_top,%sp
 	pea 96(%a6)
 	jbsr rt_c_poll

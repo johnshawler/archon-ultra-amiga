@@ -127,11 +127,15 @@ rt_{nm}:
 ''' + ('	move.w %d7,%ccr\n' if flagop else f'	move.w {CTXREGS + 40}(%a6),%ccr\n') + '	jmp (%a0)\n')
 # ---- poll (loop heads): may deliver interrupts
 w(f'''
-	.globl rt_poll
+	.globl rt_poll, rt_dbg_pc
+	.data
+rt_dbg_pc:	.long 0
+	.text
 rt_poll:
 	move.w %ccr,{CTXREGS + 40}(%a6)
 	movem.l %d0-%d6,{CTXREGS}(%a6)
-1:	move.l %sp,%a4
+1:	move.l (%sp),rt_dbg_pc
+	move.l %sp,%a4
 	lea rt_cstack_top,%sp
 	pea {CTXREGS}(%a6)
 	jbsr rt_c_poll
