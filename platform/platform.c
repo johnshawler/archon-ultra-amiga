@@ -243,6 +243,7 @@ static u32 shown_gen = 0xFFFFFFFFu;
 #ifdef DEBUGBAR
 extern u32 dbg_pc; extern u32 hw_dbg1(void), hw_dbg2(void);
 extern u32 rt_dbg_hist[32], rt_dbg_exit_code, rt_dbg_exit_a, rt_dbg_exit_b;
+extern u32 rt_dbg_port;
 extern u32 rt_dbg_last, rt_dbg_nint, rt_dbg_irq, rt_dbg_a, rt_dbg_b, rt_dbg_n5;
 static u8 dbgrows[32 * 320] __attribute__((aligned(4)));
 static u32 polls;
@@ -262,7 +263,7 @@ static void dbg_bar_draw(void)
 {
     /* one line, redrawn every 16th frame: stays cheap enough not to change the timing of the game */
     if ((vbl_count & 15) != 0) return;
-    dbg_hex(8, vbl_count); dbg_hex(60, polls); dbg_hex(112, (rt_dbg_last << 16) | (rt_dbg_nint & 0xFFFF)); dbg_hex(164, dbg_conv_total); dbg_hex(216, rt_dbg_n5); dbg_hex(268, 0);
+    dbg_hex(8, vbl_count); dbg_hex(60, polls); dbg_hex(112, (rt_dbg_last << 16) | (rt_dbg_nint & 0xFFFF)); dbg_hex(164, dbg_conv_total); dbg_hex(216, rt_dbg_n5); dbg_hex(268, rt_dbg_port);
     for (unsigned y = 0; y < 8; y++) { c2p_row320(dbgrows + y * 320, buf[0] + (200 + y) * ROW_BYTES); c2p_row320(dbgrows + y * 320, buf[1] + (200 + y) * ROW_BYTES); }
 }
 #endif

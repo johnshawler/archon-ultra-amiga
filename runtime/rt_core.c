@@ -102,7 +102,9 @@ static void pr_load(void) {
     fclose(f);
 }
 #endif
+u32 rt_dbg_port;
 u32 rt_c_in(u32 port, int size) {
+    rt_dbg_port = port;
 #ifdef HOSTED
     if (rt_replay) {
         if (!pr_loaded) pr_load();
