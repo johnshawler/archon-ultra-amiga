@@ -34,7 +34,9 @@ static int pic_next(void) {            /* returns vector or -1 */
 }
 u32 hw_dbg1(void) { return (irr[0] << 24) | (irr[1] << 16) | (isr[0] << 8) | isr[1]; }
 static u32 sb_write_busy;
+static u32 rtc_last_us, rtc_period_us;
 static u8 cmos_idx, cmos[128];
+u32 hw_dbg3(void) { return now - rtc_last_us; }
 u32 hw_dbg2(void) { return (imr[0] << 24) | (imr[1] << 16) | (cmos[0x0B] << 8) | cmos[0x0A]; }
 int hw_irq_pending(void) { return pic_next() >= 0; }
 int hw_irq_ack(void) {
@@ -125,7 +127,6 @@ static void pit_advance(void) {
 
 /* ---- CMOS RTC */
 
-static u32 rtc_last_us, rtc_period_us;
 static void rtc_advance(void) {
     if (!(cmos[0x0B] & 0x40)) { rtc_last_us = now; return; }
     u32 rate = cmos[0x0A] & 15; if (rate < 3) rate = 3;

@@ -189,7 +189,9 @@ void rt_c_poll_time(void) {
 #endif
 }
 u32 rt_dbg_irq, rt_dbg_a, rt_dbg_b, rt_dbg_n5;
+u32 rt_dbg_iflag;
 u32 rt_c_poll(struct regs *r) {
+    rt_dbg_iflag = CTX->iflag;
     rt_dbg_irq = HEAP_END;
     if (rt_replay) { CTX->poll = 1000000; return 0; }
     CTX->poll = POLL_N;
