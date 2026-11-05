@@ -4,6 +4,7 @@
 #include "bda.h"
 #ifdef HOSTED
 #include <stdio.h>
+#include <string.h>
 #include <stdlib.h>
 #endif
 
@@ -94,13 +95,12 @@ void rt_c_badtarget(u32 off, u32 ret) { rt_dbg_exit_code = 4; rt_dbg_exit_a = of
 /* ---- ports */
 #ifdef HOSTED
 static int getenv_dbg2(void) { static int v = -1; if (v < 0) v = getenv("PORTLOG") != 0; return v; }
-static struct { long idx; u16 port; u8 val; } *prd; static long npr, prp; static int pr_loaded;
-static void pr_load(void) {
-    pr_loaded = 1; FILE *f = fopen("portreads.txt", "r"); if (!f) return;
-    long cap = 600000; prd = malloc(cap * sizeof *prd); char line[64];
-    while (fgets(line, sizeof line, f) && npr < cap) { long i; unsigned p, v; if (sscanf(line, "%ld %x %x", &i, &p, &v) == 3) { prd[npr].idx = i; prd[npr].port = p; prd[npr].val = v; npr++; } }
-    fclose(f);
+static FILE *prf; static struct { long idx; u16 port; u8 val; int ok; } prc; static int pr_loaded;
+static void pr_next(void) {
+    char line[64]; prc.ok = 0;
+    while (fgets(line, sizeof line, prf)) { long i; unsigned p, v; if (sscanf(line, "%ld %x %x", &i, &p, &v) == 3) { prc.idx = i; prc.port = p; prc.val = v; prc.ok = 1; return; } }
 }
+static void pr_load(void) { pr_loaded = 1; prf = fopen("portreads.txt", "r"); if (prf) pr_next(); }
 #endif
 u32 rt_dbg_port;
 u32 rt_c_in(u32 port, int size) {
@@ -108,8 +108,8 @@ u32 rt_c_in(u32 port, int size) {
 #ifdef HOSTED
     if (rt_replay) {
         if (!pr_loaded) pr_load();
-        while (prp < npr && prd[prp].idx < rt_trn) prp++;
-        if (prp < npr && prd[prp].idx == rt_trn && prd[prp].port == port) { u32 v = prd[prp++].val; rt_cycles += 30; hw_set_exact(rt_cycles / 30.0); return v; }
+        while (prc.ok && prc.idx < rt_trn) pr_next();
+        if (prc.ok && prc.idx == rt_trn && prc.port == port) { u32 v = prc.val; pr_next(); rt_cycles += 30; hw_set_exact(rt_cycles / 30.0); return v; }
         rt_cycles += 30; hw_set_exact(rt_cycles / 30.0);
     }
 #endif
@@ -374,22 +374,35 @@ void rt_mouse_set(u32 x, u32 y, u32 b) { mouse_x = x; mouse_y = y; mouse_b = b; 
 
 #ifdef HOSTED
 #include <stdio.h>
+#include <string.h>
 static FILE *ftr;
 #define trn rt_trn
-static struct { long idx; int vec; int untraced; } ev[60000]; static int ut_active; static u32 ut_addr; static long ut_trn; static int nev, evp; static int replay_loaded;
+static FILE *evf; static char evlp[48], evlc[48], evln[48];
+static struct { long idx; int vec; int untraced; int ok; } evc;
+static int ut_active; static u32 ut_addr; static long ut_trn; static int replay_loaded;
+static void ev_next(void) {                        /* streaming: next hardware event; 'untraced' = it sits between two software-interrupt records at the same index */
+    evc.ok = 0;
+    while (evlc[0]) {
+        long i; int v, t;
+        if (evlc[0] != '#' && sscanf(evlc, "%ld %d %d", &i, &v, &t) == 3) {
+            long a1 = -1, a2 = -1; sscanf(evlp, "# sw %ld", &a1); sscanf(evln, "# sw %ld", &a2);
+            evc.idx = i; evc.vec = v; evc.untraced = (a1 == i && a2 == i); evc.ok = 1;
+        }
+        memcpy(evlp, evlc, sizeof evlp); memcpy(evlc, evln, sizeof evlc);
+        if (!fgets(evln, sizeof evln, evf)) evln[0] = 0;
+        if (evc.ok) return;
+    }
+}
 extern void hw_replay_time(u32 us);
 u32 rt_c_trace(u32 addr, struct regs *r) {
     if (!replay_loaded) {
-        replay_loaded = 1; FILE *f = fopen("irq_sched.txt", "r");
-        if (f) { static char L[300000][40]; int nl = 0; while (nl < 300000 && fgets(L[nl], 40, f)) nl++;
-            for (int k = 0; k < nl && nev < 60000; k++) { long i; int v, t; if (L[k][0] != '#' && sscanf(L[k], "%ld %d %d", &i, &v, &t) == 3) {
-                long a1 = -1, a2 = -1; if (k > 0) sscanf(L[k - 1], "# sw %ld", &a1); if (k + 1 < nl) sscanf(L[k + 1], "# sw %ld", &a2);
-                ev[nev].idx = i; ev[nev].vec = v; ev[nev].untraced = (a1 == i && a2 == i); nev++; } } fclose(f); rt_replay = 1; }
+        replay_loaded = 1; evf = fopen("irq_sched.txt", "r");
+        if (evf) { evlp[0] = 0; if (!fgets(evlc, sizeof evlc, evf)) evlc[0] = 0; if (!fgets(evln, sizeof evln, evf)) evln[0] = 0; ev_next(); rt_replay = 1; }
         ftr = fopen("iteip_ours.bin", "wb"); if (rt_replay) hw_use_exact();
     }
     if (ut_active && addr == ut_addr) { ut_active = 0; trn = ut_trn; }       /* an untraced (DOSBox-internal) handler run has returned: its instructions are not counted */
-    while (evp < nev && ev[evp].idx == trn) {
-        int vec = ev[evp].vec, unt = ev[evp].untraced; evp++;
+    while (evc.ok && evc.idx == trn) {
+        int vec = evc.vec, unt = evc.untraced; ev_next();
         if (vec == 8 && !vec_pm[8]) { st32(0x46C, ld32(0x46C) + 1); continue; }
         if (vec_pm[vec]) {
             if (vec == 0x70) { extern void hw_rtc_flag(void); hw_rtc_flag(); }
@@ -405,7 +418,18 @@ u32 rt_c_trace(u32 addr, struct regs *r) {
     { static long regn = -2; static FILE *fr; if (regn == -2) { const char *e = getenv("REGTRACE"); regn = e ? atol(e) : -1; if (regn > 0) fr = fopen("itrace_ours.log", "w"); }
       if (trn < regn) fprintf(fr, "%08x %08x %08x %08x %08x %08x %08x %08x\n", addr, r->eax, r->ecx, r->edx, r->ebx, r->ebp, r->esi, r->edi); else if (fr && trn == regn) { fclose(fr); fr = 0; } }
     static long lockn = -1; if (lockn < 0) { const char *e = getenv("LOCKN"); lockn = e ? atol(e) : 30000000; }
-    if (trn < lockn) { u32 v = addr - XL_BASE; fwrite(&v, 4, 1, ftr); }
+    static int noeip = -1; static unsigned blkn; static FILE *fblk; static u32 blk_h = 2166136261u;
+    if (noeip < 0) { noeip = getenv("NOEIP") ? 1 : 0; const char *bb = getenv("BLKN"); blkn = bb ? (unsigned)atoi(bb) : 0; if (blkn) fblk = fopen("blocks_ours.bin", "wb"); }
+    if (trn < lockn && !noeip) { u32 v = addr - XL_BASE; fwrite(&v, 4, 1, ftr); }
+    if (blkn && !ut_active) {
+        u32 v = addr - XL_BASE; blk_h = (blk_h ^ v) * 16777619u;
+        if (((trn + 1) % blkn) == 0) {
+            unsigned long long idx = (unsigned long long)(trn + 1); u32 vh = 2166136261u, dh = 2166136261u;
+            for (u32 i = 0; i < 262144; i++) vh = (vh ^ vga_mem[i]) * 16777619u;
+            for (u32 i = 0; i < 768; i++) dh = (dh ^ vga_dac[i]) * 16777619u;
+            fwrite(&idx, 8, 1, fblk); fwrite(&blk_h, 4, 1, fblk); fwrite(&vh, 4, 1, fblk); fwrite(&dh, 4, 1, fblk); blk_h = 2166136261u;
+        }
+    }
     trn++; rt_cycles += 1; hw_set_exact(rt_cycles / 30.0);
     if ((trn & 63) == 0) hw_advance((u32)(trn / 30));
     if (trn == lockn) { fflush(ftr); plat_exit(0); }
