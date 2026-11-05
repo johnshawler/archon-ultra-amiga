@@ -81,7 +81,7 @@ void plat_exit(int code) { (void)code; for (;;) R16(COLOR00) = (u16)(0x0F00 | (c
 #define CHIP_BUF1 0x22000
 #define ROW_BYTES 320            /* 8 planes x 40 bytes per line */
 #ifdef DEBUGBAR
-#define SCR_H 232
+#define SCR_H 208
 #else
 #define SCR_H 200
 #endif
@@ -260,21 +260,10 @@ static void dbg_hex2(unsigned col, unsigned row, u32 v)
 static u16 prof[8192], top_tmp[6], top_idx[6];
 static void dbg_bar_draw(void)
 {
-    { u32 o = (dbg_pc - boot_fast) >> 8; if (o < 8192) prof[o]++; }
-    if ((vbl_count & 15) == 0) {
-        for (unsigned r = 0; r < 6; r++) {
-            unsigned best = 0, bi = 0;
-            for (unsigned i = 0; i < 8192; i++) if (prof[i] > best) { best = prof[i]; bi = i; }
-            dbg_hex2(8 + r * 52, 16, bi << 8); dbg_hex2(8 + r * 52, 24, best);
-            if (best) prof[bi] = 0;     /* temporarily removed so the next-best is found; restored below */
-            top_tmp[r] = (u16)best; top_idx[r] = (u16)bi;
-        }
-        for (unsigned r = 0; r < 6; r++) prof[top_idx[r]] = top_tmp[r];
-    }
-    dbg_hex(8, dbg_pc - boot_fast); dbg_hex(60, polls); dbg_hex(112, vbl_count); dbg_hex(164, plat_time_us());
-    dbg_hex(216, (rt_dbg_last << 16) | (rt_dbg_nint & 0xFFFF)); dbg_hex(268, 0);
-    dbg_hex2(8, 8, dbg_n_ports); dbg_hex2(60, 8, dbg_n_ciab); dbg_hex2(112, 8, dbg_n_aud); dbg_hex2(164, 8, rt_dbg_exit_code); dbg_hex2(216, 8, dbg_conv_total); dbg_hex2(268, 8, (dbg_aud_pushes << 16) | dbg_aud_peak);
-    for (unsigned y = 0; y < 32; y++) { c2p_row320(dbgrows + y * 320, buf[0] + (200 + y) * ROW_BYTES); c2p_row320(dbgrows + y * 320, buf[1] + (200 + y) * ROW_BYTES); }
+    /* one line, redrawn every 16th frame: stays cheap enough not to change the timing of the game */
+    if ((vbl_count & 15) != 0) return;
+    dbg_hex(8, vbl_count); dbg_hex(60, polls); dbg_hex(112, (rt_dbg_last << 16) | (rt_dbg_nint & 0xFFFF)); dbg_hex(164, dbg_conv_total); dbg_hex(216, rt_dbg_n5); dbg_hex(268, 0);
+    for (unsigned y = 0; y < 8; y++) { c2p_row320(dbgrows + y * 320, buf[0] + (200 + y) * ROW_BYTES); c2p_row320(dbgrows + y * 320, buf[1] + (200 + y) * ROW_BYTES); }
 }
 #endif
 static u8 conv_valid[2]; static u32 conv_start[2], conv_pitch[2];
@@ -316,7 +305,7 @@ static void display_update(void)
     dbg_conv_total++;
     conv_valid[bb] = 1; conv_start[bb] = start; conv_pitch[bb] = pitch;
 #ifdef DEBUGBAR
-    for (unsigned y = 0; y < 32; y++) c2p_row320(dbgrows + y * 320, dst + (200 + y) * ROW_BYTES);
+    for (unsigned y = 0; y < 8; y++) c2p_row320(dbgrows + y * 320, dst + (200 + y) * ROW_BYTES);
 #endif
     flip_pending = 1;
 }
