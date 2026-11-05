@@ -5679,7 +5679,25 @@ rt_iretd:				| stack: [eip][cs][eflags] (all LE); restores CF/ZF/SF/OF and IF fr
 
 	.ifdef HOSTED
 	.globl rt_trace
-rt_trace:				| debug/replay build: log eip, optionally inject a recorded interrupt before the instruction
+rt_trace:				| replay build, fast path: count down to the next stop, fold the instruction address into the rolling hash, flags untouched
+	move.w %ccr,148(%a6)
+	move.l (%sp)+,%a0		| return address (points at the .long with the x86 address)
+	clr.l -4(%sp)			| never leave the native return address in the dead area of the x86 stack (the game reads uninitialised stack)
+	subq.l #1,140(%a6)
+	beq.s 3f
+	move.l %d7,152(%a6)
+	move.l (%a0),%d7
+	sub.l #XL_BASE,%d7
+	eor.l %d7,144(%a6)
+	move.l 144(%a6),%d7
+	mulu.l #16777619,%d7
+	move.l %d7,144(%a6)
+	move.l 152(%a6),%d7
+	move.w 148(%a6),%ccr
+	jmp 4(%a0)
+3:	move.l %a0,-(%sp)		| (MOVE changes the flags: restore them last)
+	move.w 148(%a6),%ccr
+rt_trace_full:			| slow path: log eip, optionally inject a recorded interrupt before the instruction
 	move.w %ccr,136(%a6)
 	movem.l %d0-%d6,96(%a6)
 	move.l (%sp)+,%a2		| return address (points at the .long)
@@ -5701,12 +5719,13 @@ rt_trace:				| debug/replay build: log eip, optionally inject a recorded interru
 	pea XL_SENT_BE_TRACE
 	jmp (%a1)
 	.globl rt_trace_isr_return
-rt_trace_isr_return:
+rt_trace_isr_return:		| the handler is done: trace the interrupted instruction through the normal entry (counting and hashing stay in step)
 	move.w %ccr,136(%a6)
 	move.l (%sp)+,%a2
 	clr.l -4(%sp)
-	movem.l %d0-%d6,96(%a6)
-	bra 1b
+	move.l %a2,-(%sp)
+	move.w 136(%a6),%ccr
+	bra rt_trace
 2:	movem.l 96(%a6),%d0-%d6
 	move.w 136(%a6),%ccr
 	jmp 4(%a2)

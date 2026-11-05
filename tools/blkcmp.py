@@ -2,7 +2,8 @@
 """blkcmp.py dosbox/blocks.bin ours/blocks_ours.bin : compare the per-block checkpoints (executed-instruction hash, VGA memory hash, palette hash)."""
 import sys, numpy as np
 dt = np.dtype([('idx', '<u8'), ('eip', '<u4'), ('vga', '<u4'), ('dac', '<u4')])
-a = np.fromfile(sys.argv[1], dtype=dt); b = np.fromfile(sys.argv[2], dtype=dt)
+dtb = np.dtype([('idx', '>u8'), ('eip', '>u4'), ('vga', '>u4'), ('dac', '>u4')])      # the harness runs as m68k: big endian
+a = np.fromfile(sys.argv[1], dtype=dt); b = np.fromfile(sys.argv[2], dtype=dtb)
 n = min(len(a), len(b))
 print('blocks: dosbox %d, ours %d (compared %d, %d instructions each block %d..)' % (len(a), len(b), n, int(a['idx'][1] - a['idx'][0]) if n > 1 else 0, int(a['idx'][0]) if n else 0))
 bad = [(k, f) for k in range(n) for f in ('idx', 'eip', 'vga', 'dac') if a[f][k] != b[f][k]]

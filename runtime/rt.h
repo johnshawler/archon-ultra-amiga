@@ -24,6 +24,12 @@ struct ctx {
     u32 regs[8];         /* 96: register save area used by the asm stubs */
     u32 pad128[2];
     u16 ccr_stub;        /* 136 */
+    u16 pad136;
+    s32 trem;            /* 140: HOSTED trace fast path: instructions left until the next slow stop */
+    u32 thash;           /* 144: rolling FNV hash of the executed instruction addresses (since the last checkpoint) */
+    u16 tccr;            /* 148 */
+    u16 pad148;
+    u32 tsave;           /* 152: d7 across the trace fast path */
 };
 
 /* Registers as passed to C by the asm stubs (d0..d6 = eax ecx edx ebx ebp esi edi). */

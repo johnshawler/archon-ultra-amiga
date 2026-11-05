@@ -8,7 +8,12 @@
 #include <stdlib.h>
 #endif
 
-u8 *WIN; struct ctx *CTX; long rt_replay; long rt_trn;
+u8 *WIN; struct ctx *CTX; long rt_replay;
+#ifdef HOSTED
+static u64 tstop;                                   /* index of the instruction at which the trace stub next calls the slow handler */
+#define rt_trn ((long long)(tstop - (u32)CTX->trem) + 1)     /* instructions counted including the one being executed (what the reference records), exact between stops */
+static double tports;                                /* cycles charged for port reads, on top of one per instruction */
+#endif
 #ifdef HOSTED
 double rt_cycles; extern void hw_set_exact(double us); extern void hw_use_exact(void);
 #endif
@@ -109,14 +114,14 @@ u32 rt_c_in(u32 port, int size) {
     if (rt_replay) {
         if (!pr_loaded) pr_load();
         while (prc.ok && prc.idx < rt_trn) pr_next();
-        if (prc.ok && prc.idx == rt_trn && prc.port == port) { u32 v = prc.val; pr_next(); rt_cycles += 30; hw_set_exact(rt_cycles / 30.0); return v; }
-        rt_cycles += 30; hw_set_exact(rt_cycles / 30.0);
+        if (prc.ok && prc.idx == rt_trn && prc.port == port) { u32 v = prc.val; pr_next(); tports += 30; rt_cycles = (double)rt_trn + tports; hw_set_exact(rt_cycles / 30.0); return v; }
+        tports += 30; rt_cycles = (double)rt_trn + tports; hw_set_exact(rt_cycles / 30.0);
     }
 #endif
     int h; u32 v = vga_port_in(port, size, &h); if (h) return v;
     v = hw_port_in(port, size, &h);
 #ifdef HOSTED
-    if (rt_replay && (port == 0x42 || port == 0x201 || port == 0x40) && getenv_dbg2()) plat_log("PR %ld %x %x\n", rt_trn, port, v & 0xFF);
+    if (rt_replay && (port == 0x42 || port == 0x201 || port == 0x40) && getenv_dbg2()) plat_log("PR %lld %x %x\n", rt_trn, port, v & 0xFF);
 #endif
     if (h) return v;
     { static u8 seen[65536]; if (!seen[port & 0xFFFF]++) plat_log("rt: in %x (size %d) unhandled\n", port, size); }
@@ -361,6 +366,9 @@ int rt_c_int(u32 vec, struct regs *r) {
 
 void rt_init(u8 *win, struct ctx *ctx) {
     WIN = win; CTX = ctx; ctx->poll = POLL_N; ctx->iflag = 1;
+#ifdef HOSTED
+    ctx->trem = 1; ctx->thash = 2166136261u; tstop = 0;
+#endif
     ctx->sel[0] = 0x28; ctx->sel[1] = 0x170; ctx->sel[2] = 0x178; ctx->sel[3] = 0x178; ctx->sel[4] = 0; ctx->sel[5] = 0x20;
     vga_init(); hw_init();
     for (int i = 0; i < 5; i++) { files[i].name[0] = 1; }
@@ -376,17 +384,32 @@ void rt_mouse_set(u32 x, u32 y, u32 b) { mouse_x = x; mouse_y = y; mouse_b = b; 
 #include <stdio.h>
 #include <string.h>
 static FILE *ftr;
-#define trn rt_trn
 static FILE *evf; static char evlp[48], evlc[48], evln[48];
-static struct { long idx; int vec; int untraced; int ok; } evc;
+static struct { long idx; int vec; int untraced; int ok; int rep; u32 repo; } evc;
 static int ut_active; static u32 ut_addr; static long ut_trn; static int replay_loaded;
+static int rep_pending; static u32 rep_addr, rep_resume;
+static unsigned blkn; static FILE *fblk; static int hashlog; static u64 stepn = 2048;
+/* one instruction joins the rolling hash; at every checkpoint the hash, the VGA memory and the palette are recorded */
+static void acct(u64 idx, u32 v) {
+    u32 h = (CTX->thash ^ v) * 16777619u;
+    if (blkn && ((idx + 1) % blkn) == 0) {
+        unsigned long long ix = idx + 1; u32 vh = 2166136261u, dh = 2166136261u;
+        for (u32 i = 0; i < 262144; i++) vh = (vh ^ vga_mem[i]) * 16777619u;
+        for (u32 i = 0; i < 768; i++) dh = (dh ^ vga_dac[i]) * 16777619u;
+        fwrite(&ix, 8, 1, fblk); fwrite(&h, 4, 1, fblk); fwrite(&vh, 4, 1, fblk); fwrite(&dh, 4, 1, fblk);
+        h = 2166136261u;
+    }
+    CTX->thash = h;
+    if (hashlog && ((idx + 1) % stepn) == 0) plat_log("HASH %llu %08x\n", (unsigned long long)(idx + 1), h);
+}
 static void ev_next(void) {                        /* streaming: next hardware event; 'untraced' = it sits between two software-interrupt records at the same index */
     evc.ok = 0;
     while (evlc[0]) {
-        long i; int v, t;
-        if (evlc[0] != '#' && sscanf(evlc, "%ld %d %d", &i, &v, &t) == 3) {
+        long i; int v, t; unsigned ro = 0;
+        if (evlc[0] != '#' && sscanf(evlc, "%ld %d %d R%x", &i, &v, &t, &ro) >= 3) {
             long a1 = -1, a2 = -1; sscanf(evlp, "# sw %ld", &a1); sscanf(evln, "# sw %ld", &a2);
             evc.idx = i; evc.vec = v; evc.untraced = (a1 == i && a2 == i); evc.ok = 1;
+            evc.rep = strchr(evlc, 'R') != 0; evc.repo = ro;           /* the interrupt arrived in the middle of a rep string instruction (its address) */
         }
         memcpy(evlp, evlc, sizeof evlp); memcpy(evlc, evln, sizeof evlc);
         if (!fgets(evln, sizeof evln, evf)) evln[0] = 0;
@@ -395,44 +418,58 @@ static void ev_next(void) {                        /* streaming: next hardware e
 }
 extern void hw_replay_time(u32 us);
 u32 rt_c_trace(u32 addr, struct regs *r) {
+    u64 trn = tstop;                                  /* a slow stop is entered with trem == 0: this instruction's index is tstop */
+    static long long lockn = -1; static int noeip = -1; static int dbgmode; static long long ewlo = -1, ewhi; static FILE *few;
     if (!replay_loaded) {
         replay_loaded = 1; evf = fopen("irq_sched.txt", "r");
         if (evf) { evlp[0] = 0; if (!fgets(evlc, sizeof evlc, evf)) evlc[0] = 0; if (!fgets(evln, sizeof evln, evf)) evln[0] = 0; ev_next(); rt_replay = 1; }
         ftr = fopen("iteip_ours.bin", "wb"); if (rt_replay) hw_use_exact();
+        { const char *e = getenv("LOCKN"); lockn = e ? atoll(e) : 30000000; }
+        noeip = getenv("NOEIP") ? 1 : 0; { const char *bb = getenv("BLKN"); blkn = bb ? (unsigned)atoi(bb) : 0; if (blkn) fblk = fopen("blocks_ours.bin", "wb"); }
+        { const char *e = getenv("EIPWIN"); if (e) sscanf(e, "%lld:%lld", &ewlo, &ewhi); }
+        hashlog = getenv("HASHLOG") != 0; { const char *e = getenv("STEP"); if (e) stepn = (u64)atoll(e); if (!stepn) stepn = 2048; }
+        dbgmode = getenv("WATCHPC") || getenv("REGTRACE") || getenv("DUMPIDX");
     }
-    if (ut_active && addr == ut_addr) { ut_active = 0; trn = ut_trn; }       /* an untraced (DOSBox-internal) handler run has returned: its instructions are not counted */
-    while (evc.ok && evc.idx == trn) {
-        int vec = evc.vec, unt = evc.untraced; ev_next();
+    if (ut_active && addr == ut_addr) { ut_active = 0; trn = ut_trn; tstop = trn; }
+    if (rep_pending && addr == rep_resume) { rep_pending = 0; acct(trn, rep_addr - XL_BASE); trn++; tstop = trn; }      /* the interrupted rep instruction is traced again when it resumes */       /* an untraced (DOSBox-internal) handler run has returned: its instructions are not counted */
+    while (evc.ok && (u64)evc.idx == trn) {
+        int vec = evc.vec, unt = evc.untraced, erep = evc.rep; u32 erepo = evc.repo; ev_next();
         if (vec == 8 && !vec_pm[8]) { st32(0x46C, ld32(0x46C) + 1); continue; }
         if (vec_pm[vec]) {
             if (vec == 0x70) { extern void hw_rtc_flag(void); hw_rtc_flag(); }
             u32 off = vec_pm[vec] - XL_BASE; u32 t = xl_tab[off];
-            if (t) { if (unt && !ut_active) { ut_active = 1; ut_addr = addr; ut_trn = trn; } u32 ef = rt_mk_eflags(CTX->ccr_stub); CTX->tmp[0] = (ef << 24) | ((ef & 0xFF00) << 8) | ((ef >> 8) & 0xFF00) | (ef >> 24); return t; }
+            if (t) {
+                if (unt && !ut_active) { ut_active = 1; ut_addr = addr; ut_trn = trn; }
+                if (erep && !unt) { rep_pending = 1; rep_addr = erepo + XL_BASE; rep_resume = addr; }
+                u32 ef = rt_mk_eflags(CTX->ccr_stub); CTX->tmp[0] = (ef << 24) | ((ef & 0xFF00) << 8) | ((ef >> 8) & 0xFF00) | (ef >> 24);
+                tstop = trn; CTX->trem = 1;                  /* the handler's first instruction is index trn again: stop there too */
+                return t;
+            }
         }
     }
-    { static long dumpidx = -2; if (dumpidx == -2) { const char *e = getenv("DUMPIDX"); dumpidx = e ? atol(e) : -1; }
-      if (dumpidx >= 0 && trn == dumpidx) { FILE *f = fopen("obj3_idx.bin", "wb"); fwrite(WIN + OBJ3_BASE, 1, 0x33dd0, f); fclose(f); f = fopen("vga_idx.bin", "wb"); fwrite(vga_mem, 1, 262144, f); fwrite(vga_dac, 1, 768, f); fclose(f); { u32 st, pt; int c4; extern void vga_get_display(u32 *, u32 *, int *); vga_get_display(&st, &pt, &c4); f = fopen("vga_disp.txt", "w"); fprintf(f, "%u %u %d\n", st, pt, c4); fclose(f); } f = fopen("heap_idx.bin", "wb"); fwrite(WIN + 0x1e0000, 1, 0x700000, f); fclose(f); f = fopen("low_idx.bin", "wb"); fwrite(WIN, 1, 0xA0000, f); fclose(f); plat_exit(0); } }
+    { static long long dumpidx = -2; if (dumpidx == -2) { const char *e = getenv("DUMPIDX"); dumpidx = e ? atoll(e) : -1; }
+      if (dumpidx >= 0 && (long long)trn == dumpidx) { FILE *f = fopen("obj3_idx.bin", "wb"); fwrite(WIN + OBJ3_BASE, 1, 0x33dd0, f); fclose(f); f = fopen("vga_idx.bin", "wb"); fwrite(vga_mem, 1, 262144, f); fwrite(vga_dac, 1, 768, f); fclose(f); { u32 st, pt; int c4; extern void vga_get_display(u32 *, u32 *, int *); vga_get_display(&st, &pt, &c4); f = fopen("vga_disp.txt", "w"); fprintf(f, "%u %u %d\n", st, pt, c4); fclose(f); } f = fopen("heap_idx.bin", "wb"); fwrite(WIN + 0x1e0000, 1, 0x700000, f); fclose(f); f = fopen("low_idx.bin", "wb"); fwrite(WIN, 1, 0xA0000, f); fclose(f); plat_exit(0); } }
     { static u32 wp[8]; static int nwp = -1; static int hits[8];
       if (nwp < 0) { nwp = 0; const char *e = getenv("WATCHPC"); while (e && *e && nwp < 8) { wp[nwp++] = strtoul(e, (char **)&e, 16); if (*e == ',') e++; } }
-      for (int k = 0; k < nwp; k++) if (wp[k] == addr && hits[k]++ < 400) plat_log("WATCH %x idx=%ld eax=%08x ecx=%08x edx=%08x ebx=%08x ebp=%08x esi=%08x edi=%08x\n", addr, trn, r->eax, r->ecx, r->edx, r->ebx, r->ebp, r->esi, r->edi); }
-    { static long regn = -2; static FILE *fr; if (regn == -2) { const char *e = getenv("REGTRACE"); regn = e ? atol(e) : -1; if (regn > 0) fr = fopen("itrace_ours.log", "w"); }
-      if (trn < regn) fprintf(fr, "%08x %08x %08x %08x %08x %08x %08x %08x\n", addr, r->eax, r->ecx, r->edx, r->ebx, r->ebp, r->esi, r->edi); else if (fr && trn == regn) { fclose(fr); fr = 0; } }
-    static long lockn = -1; if (lockn < 0) { const char *e = getenv("LOCKN"); lockn = e ? atol(e) : 30000000; }
-    static int noeip = -1; static unsigned blkn; static FILE *fblk; static u32 blk_h = 2166136261u;
-    if (noeip < 0) { noeip = getenv("NOEIP") ? 1 : 0; const char *bb = getenv("BLKN"); blkn = bb ? (unsigned)atoi(bb) : 0; if (blkn) fblk = fopen("blocks_ours.bin", "wb"); }
-    if (trn < lockn && !noeip) { u32 v = addr - XL_BASE; fwrite(&v, 4, 1, ftr); }
-    if (blkn && !ut_active) {
-        u32 v = addr - XL_BASE; blk_h = (blk_h ^ v) * 16777619u;
-        if (((trn + 1) % blkn) == 0) {
-            unsigned long long idx = (unsigned long long)(trn + 1); u32 vh = 2166136261u, dh = 2166136261u;
-            for (u32 i = 0; i < 262144; i++) vh = (vh ^ vga_mem[i]) * 16777619u;
-            for (u32 i = 0; i < 768; i++) dh = (dh ^ vga_dac[i]) * 16777619u;
-            fwrite(&idx, 8, 1, fblk); fwrite(&blk_h, 4, 1, fblk); fwrite(&vh, 4, 1, fblk); fwrite(&dh, 4, 1, fblk); blk_h = 2166136261u;
-        }
-    }
-    trn++; rt_cycles += 1; hw_set_exact(rt_cycles / 30.0);
-    if ((trn & 63) == 0) hw_advance((u32)(trn / 30));
-    if (trn == lockn) { fflush(ftr); plat_exit(0); }
+      for (int k = 0; k < nwp; k++) if (wp[k] == addr && hits[k]++ < 400) plat_log("WATCH %x idx=%lld eax=%08x ecx=%08x edx=%08x ebx=%08x ebp=%08x esi=%08x edi=%08x\n", addr, (long long)trn, r->eax, r->ecx, r->edx, r->ebx, r->ebp, r->esi, r->edi); }
+    { static long long regn = -2; static FILE *fr; if (regn == -2) { const char *e = getenv("REGTRACE"); regn = e ? atoll(e) : -1; if (regn > 0) fr = fopen("itrace_ours.log", "w"); }
+      if ((long long)trn < regn) fprintf(fr, "%08x %08x %08x %08x %08x %08x %08x %08x\n", addr, r->eax, r->ecx, r->edx, r->ebx, r->ebp, r->esi, r->edi); else if (fr && (long long)trn == regn) { fclose(fr); fr = 0; } }
+    u32 v = addr - XL_BASE;
+    if ((long long)trn < lockn && !noeip) fwrite(&v, 4, 1, ftr);
+    if (ewlo >= 0 && (long long)trn + 1 > ewlo && (long long)trn + 1 <= ewhi) { if (!few) few = fopen("eipwin_ours.bin", "wb"); fwrite(&v, 4, 1, few); if ((long long)trn + 1 == ewhi) fflush(few); }
+    if (!ut_active) acct(trn, v);                      /* the instruction being executed joins the rolling hash (the fast path does this for all the others) */
+    u64 T = trn + 1;                                   /* index of the next instruction */
+    rt_cycles = (double)T + tports; hw_set_exact(rt_cycles / 30.0);
+    hw_advance((u32)(T / 30));
+    if ((long long)T == lockn) { fflush(ftr); if (fblk) fflush(fblk); plat_exit(0); }
+    /* next stop: an event, a checkpoint, the end, or soon (device time must advance); every instruction while debugging, writing the EIP file or inside an untraced handler */
+    u64 S = ((T + stepn) / stepn) * stepn - 1;            /* stops where (index + 1) is a multiple of the step (2048 by default) */
+    if (ut_active || rep_pending || dbgmode || !noeip) S = T;
+    if (ewlo >= 0 && (long long)T <= ewhi) { if ((long long)T + 1 > ewlo) S = T; else if ((u64)ewlo - 1 >= T && (u64)ewlo - 1 < S) S = (u64)ewlo - 1; }
+    if (evc.ok && (u64)evc.idx < S && (u64)evc.idx >= T) S = (u64)evc.idx;
+    if (blkn) { u64 nb = ((T + 1 + blkn - 1) / blkn) * blkn - 1; if (nb >= T && nb < S) S = nb; }
+    if (lockn > 0 && (u64)lockn - 1 >= T && (u64)lockn - 1 < S) S = (u64)lockn - 1;
+    tstop = S; CTX->trem = (s32)(S - trn);
     return 0;
 }
 
