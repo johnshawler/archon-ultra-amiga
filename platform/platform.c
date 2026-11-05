@@ -263,7 +263,7 @@ static void dbg_bar_draw(void)
 {
     /* one line, redrawn every 16th frame: stays cheap enough not to change the timing of the game */
     if ((vbl_count & 15) != 0) return;
-    dbg_hex(8, vbl_count); dbg_hex(60, polls); dbg_hex(112, (rt_dbg_last << 16) | (rt_dbg_nint & 0xFFFF)); dbg_hex(164, dbg_conv_total); dbg_hex(216, rt_dbg_n5); dbg_hex(268, rt_dbg_port);
+    dbg_hex(8, vbl_count); dbg_hex(60, polls); dbg_hex(112, (rt_dbg_last << 16) | (rt_dbg_nint & 0xFFFF)); dbg_hex(164, dbg_conv_total); dbg_hex(216, ((u32)is_pal << 24) | (plat_time_us() % 14268u) | ((u32)(R16(0x004) & 1) << 16)); dbg_hex(268, rt_dbg_port);
     for (unsigned y = 0; y < 8; y++) { c2p_row320(dbgrows + y * 320, buf[0] + (200 + y) * ROW_BYTES); c2p_row320(dbgrows + y * 320, buf[1] + (200 + y) * ROW_BYTES); }
 }
 #endif
