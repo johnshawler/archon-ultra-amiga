@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """mkhdfboot.py out.hdf launch.bin payload.bin name=path ... : ONE bootable hard-disk image for the A1200.
 
-Kickstart 3.1 boots hard disks through the filesystem (it does not run a partition bootblock), so the image carries a small OFS volume DH0 with
-S/Startup-Sequence and 'ArchonUltra', an AmigaDOS executable = launch.bin (the takeover code) + the stage-2 payload.  The game's data (ARCH table, the
-PKG files, ...) lives in the raw blocks after that volume, outside any partition; the game finds it by scanning for the 'ARCH' signature.
+Kickstart 3.1 boots hard disks through the filesystem (it does not run a partition bootblock), so the image carries one FFS volume DH0 (label ARCHON)
+with S/Startup-Sequence, 'ArchonUltra' (an AmigaDOS executable = launch.bin + the stage-2 payload) and the game's data files.  The game reads its
+data through AmigaDOS (SYS:name), so it works with any kind of drive (UAE hardfile, IDE, SCSI, CF ...).
 
 Geometry: 512-byte blocks, 16 heads x 63 sectors = 1008 blocks per cylinder.  Cylinder 0 = RDB (RDSK block 0, PART block 1).
 """
@@ -34,8 +34,8 @@ def hashname(name, n=HT):
     return h % n
 
 
-class OFS:
-    """Minimal OFS volume writer (one partition starting at partition block 0)."""
+class FFS:
+    """Minimal FFS ('DOS\\1') volume writer (one partition starting at partition block 0)."""
     def __init__(self, nblocks, label):
         self.n = nblocks; self.blocks = {}; self.root = nblocks // 2
         self.next_free = 2; self.used = {self.root}; self.label = label
@@ -62,7 +62,7 @@ class OFS:
 
     def add_file(self, name, data, parent_blk, parent_tab, parent_blocks_ref):
         hdr_blk = self.alloc()
-        nd = (len(data) + 487) // 488
+        nd = (len(data) + BS - 1) // BS
         data_blks = [self.alloc() for _ in range(nd)]
         h = self._hdr(hdr_blk, name, parent_blk, 0xFFFFFFFD)
         put(h, 16, data_blks[0] if nd else 0); put(h, 324, len(data))
@@ -76,11 +76,9 @@ class OFS:
             put(prev, 504, eb); ext_blks.append((eb, e)); prev = e
         for eb, e in ext_blks:
             csum_set(e); self.blocks[eb] = e
-        for i, db in enumerate(data_blks):
-            blk = bytearray(BS); chunk = data[i * 488:(i + 1) * 488]
-            put(blk, 0, 8); put(blk, 4, hdr_blk); put(blk, 8, i + 1); put(blk, 12, len(chunk)); put(blk, 16, data_blks[i + 1] if i + 1 < nd else 0)
-            blk[24:24 + len(chunk)] = chunk
-            csum_set(blk); self.blocks[db] = blk
+        for i, db in enumerate(data_blks):                                       # FFS: data blocks hold 512 raw bytes
+            chunk = data[i * BS:(i + 1) * BS]
+            self.blocks[db] = bytearray(chunk + bytes(BS - len(chunk)))
         self.blocks[hdr_blk] = h
         return hdr_blk, h
 
@@ -101,30 +99,29 @@ class OFS:
             csum_set(b); self.blocks[blk] = b
             h = hashname(d); old = self.root_tab[h]; self.root_tab[h] = blk
             if old: put(b, 496, old); csum_set(b)
-        # bitmap block
-        bm = self.alloc(); self.used.add(bm)
-        words = [0xFFFFFFFF] * 127
-        total = self.n - 2
-        for i in range(total):
-            blk = i + 2
-            if blk in self.used:
-                words[i // 32] &= ~(1 << (i % 32)) & 0xFFFFFFFF
-        # blocks beyond the end of the partition are not free
-        for i in range(total, 127 * 32):
-            words[i // 32] &= ~(1 << (i % 32)) & 0xFFFFFFFF
-        bmb = bytearray(BS); struct.pack_into('>127I', bmb, 4, *words)
-        s = sum(words) & 0xFFFFFFFF; put(bmb, 0, (-s) & 0xFFFFFFFF); self.blocks[bm] = bmb
+        # bitmap blocks: one per 4064 blocks (127 longs x 32), listed in the root block
+        total = self.n - 2; npages = (total + 4063) // 4064
+        bm_blocks = [self.alloc() for _ in range(npages)]
+        for k, bm in enumerate(bm_blocks):
+            words = [0xFFFFFFFF] * 127
+            for j in range(127 * 32):
+                i = k * 4064 + j
+                if i >= total or (i + 2) in self.used:
+                    words[j // 32] &= ~(1 << (j % 32)) & 0xFFFFFFFF
+            bmb = bytearray(BS); struct.pack_into('>127I', bmb, 4, *words)
+            put(bmb, 0, (-(sum(words) & 0xFFFFFFFF)) & 0xFFFFFFFF); self.blocks[bm] = bmb
         # root block
         r = bytearray(BS); put(r, 0, 2); put(r, 12, HT)
         for i, v in enumerate(self.root_tab): put(r, 24 + 4 * i, v)
-        put(r, 312, 0xFFFFFFFF); put(r, 316, bm)
+        put(r, 312, 0xFFFFFFFF)
+        for k, bm in enumerate(bm_blocks): put(r, 316 + 4 * k, bm)
         d, m, t = self.date
         for off in (472, 484): put(r, off, d); put(r, off + 4, m); put(r, off + 8, t)
         put(r, 420, d); put(r, 424, m); put(r, 428, t)
         bstr(r, 432, self.label, 30); put(r, 508, 1)
         csum_set(r); self.blocks[self.root] = r
         # boot block (not bootable code, only the DOS type; the system boots through the filesystem)
-        bb = bytearray(2 * BS); bb[0:4] = b'DOS\0'; put(bb, 8, self.root); self.blocks[0] = bb[:BS]; self.blocks[1] = bb[BS:]
+        bb = bytearray(2 * BS); bb[0:4] = b'DOS\1'; put(bb, 8, self.root); self.blocks[0] = bb[:BS]; self.blocks[1] = bb[BS:]
 
     def image(self):
         img = bytearray(self.n * BS)
@@ -150,7 +147,7 @@ def rdb_blocks(cyls, part_lo, part_hi):
           [0, CYL - 1, 1, cyls - 1, CYL, 0, 1, 0] + cstr('ARCHON', 8) + cstr('ULTRA-AMIGA', 16) + cstr('1.0', 4)
     rdb = rdb[:64] + [0] * (64 - len(rdb))
     nm = b'DH0'; name = list(struct.unpack('>8I', (bytes([len(nm)]) + nm).ljust(32, b'\0')))
-    env = [16, 128, 0, HEADS, 1, SPT, 2, 0, 0, part_lo, part_hi, 30, 0, 0x7FFFFFFF, 0xFFFFFFFE, 0, 0x444F5300]
+    env = [16, 128, 0, HEADS, 1, SPT, 2, 0, 0, part_lo, part_hi, 30, 0, 0x7FFFFFFF, 0xFFFFFFFE, 0, 0x444F5301]
     part = [0x50415254, 64, 0, 7, 0xFFFFFFFF, 1, 0, 0, 0] + name + [0] * 15 + env
     part = part[:64] + [0] * (64 - len(part))
     return block(rdb), block(part)
@@ -162,27 +159,22 @@ def main():
     launch = bytearray(open(launchf, 'rb').read()); pay = open(payf, 'rb').read()
     struct.pack_into('>I', launch, len(launch) - 4, len(pay))                     # payload_len is the last long of the stub
     exe = hunk_exe(bytes(launch) + pay)
-    # the volume: only what the boot needs; ~2 cylinders
-    nblocks = 2 * CYL
-    vol = OFS(nblocks, 'ARCHON')
-    vol.build([(None, 'ArchonUltra', exe), ('s', 'Startup-Sequence', b'SYS:ArchonUltra\n')], ['s'])
-    part_lo, part_hi = 1, 2
-    data_blk = (1 + 2) * CYL                                                       # raw data region starts at cylinder 3
-    ent = b''; lba = 1; data = b''
-    for name, path in files:
-        d = open(path, 'rb').read()
-        ent += name.encode().ljust(16, b'\0') + struct.pack('>II', lba, len(d)) + bytes(8)
-        pad = (-len(d)) % BS; data += d + bytes(pad); lba += (len(d) + pad) // BS
-    hdr = b'ARCH' + bytes([len(files)]) + bytes(11) + ent; hdr += bytes(BS - len(hdr))
-    blob = hdr + data
-    cyls = (data_blk + len(blob) // BS + CYL - 1) // CYL
+    contents = [(None, 'ArchonUltra', exe), ('s', 'Startup-Sequence', b'SYS:ArchonUltra\n')]
+    for name, path in files: contents.append((None, name, open(path, 'rb').read()))
+    need = 4 + sum(1 + (len(d) + BS - 1) // BS + (len(d) // BS // 72 + 1) for _, _, d in contents)
+    need += need // 4064 + 4
+    cyls_vol = (need + CYL - 1) // CYL + 1                                         # a spare cylinder
+    nblocks = cyls_vol * CYL
+    vol = FFS(nblocks, 'ARCHON')
+    vol.build(contents, ['s'])
+    part_lo, part_hi = 1, cyls_vol
+    cyls = 1 + cyls_vol
     img = bytearray(cyls * CYL * BS)
     r, p = rdb_blocks(cyls, part_lo, part_hi)
     img[0:BS] = r; img[BS:2 * BS] = p
     v = vol.image(); img[CYL * BS:CYL * BS + len(v)] = v
-    img[data_blk * BS:data_blk * BS + len(blob)] = blob
     open(out, 'wb').write(img)
-    print('%s: %d bytes, %d cylinders; volume DH0 cylinders %d-%d, data table at block %d' % (out, len(img), cyls, part_lo, part_hi, data_blk))
+    print('%s: %d bytes, %d cylinders; volume DH0 (FFS) cylinders %d-%d, %d of %d blocks used' % (out, len(img), cyls, part_lo, part_hi, len(vol.used), nblocks))
 
 
 main()

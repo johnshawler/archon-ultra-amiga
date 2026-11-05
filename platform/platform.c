@@ -1,5 +1,6 @@
-/* platform.c - Archon Ultra on the Amiga 1200 (AGA, 68030, fast RAM): hardware, display, timing, input, IDE data disk, glue to the runtime.
- * No OS, no libc.  Entered from crt0 in supervisor mode.  See docs/DESIGN.md. */
+/* platform.c - Archon Ultra on the Amiga 1200 (AGA, 68030, fast RAM): display, sound, timing, input, file access, glue to the runtime.
+ * The OS stays alive underneath: the game owns the screen, Paula audio and the joystick/mouse registers; it uses OS interrupt servers for the vertical
+ * blank, an input.device handler for the keyboard, and AmigaDOS for its data files (so any kind of drive works).  User mode, no libc. */
 #include "../runtime/rt.h"
 
 #define R16(o) (*(volatile u16 *)(0xDFF000u + (o)))
@@ -60,7 +61,10 @@ enum { C_PRA = 0, C_PRB = 1, C_DDRA = 2, C_DDRB = 3, C_TALO = 4, C_TAHI = 5, C_T
 
 extern u32 boot_fast, boot_fast_size, boot_chip, boot_chip_size;
 extern u8 _end[];
-extern void isr_vbl(void), isr_ciab(void), isr_ports(void), isr_aud(void), isr_default(void);
+extern u32 os_call(void *base, s32 lvo, u32 d0, u32 d1, u32 d2, u32 d3, u32 a0, u32 a1);
+extern void vbl_server(void), input_handler(void);
+static u32 sysbase, dosbase, gfxbase, oldview;           /* from the launcher (boot info at the top of the chip block) */
+#define EXEC(lvo, d0, d1, a0, a1) os_call((void *)sysbase, lvo, d0, d1, 0, 0, a0, a1)
 extern void c2p_row320(const u8 *src, u8 *dst);
 extern void c2p_row320_dirty(const u8 *src, u8 *dst, u8 *flags, u32 mask);
 extern u8 vga_dirty[16384];
@@ -93,45 +97,12 @@ static int is_pal;
 static u16 vstart;
 
 /* ------------------------------------------------------------------------------------------- exceptions */
-static u32 vectors[256];
 u32 dbg_conv_total;
 extern u32 dbg_aud_pushes, dbg_aud_peak;
 u32 dbg_n_ports, dbg_n_ciab, dbg_n_aud, dbg_n_def;
-void plat_isr_default_c(void) { dbg_n_def++; R16(INTREQ) = 0x7FFF; }
 /* crash screen: eight hex digits per line in a one-plane hires picture (vector, SR, PC, fault address / format word, then 8 stack longs) */
 static const u8 hexfont[16][7] = { {14,17,19,21,25,17,14},{4,12,4,4,4,4,14},{14,17,1,2,4,8,31},{30,1,1,14,1,1,30},{2,6,10,18,31,2,2},{31,16,30,1,1,17,14},{6,8,16,30,17,17,14},{31,1,2,4,8,8,8},
                                    {14,17,17,14,17,17,14},{14,17,17,15,1,2,12},{14,17,17,31,17,17,17},{30,17,17,30,17,17,30},{14,17,16,16,16,17,14},{30,17,17,17,17,17,30},{31,16,16,30,16,16,31},{31,16,16,30,16,16,16} };
-void plat_crash_c(u32 vec, u32 *sp)
-{
-    u8 *scr = (u8 *)boot_chip + CHIP_BUF0; u32 words[16]; unsigned n = 0;
-    words[n++] = vec; words[n++] = sp[0] >> 16; words[n++] = (sp[0] << 16) | (sp[1] >> 16); words[n++] = (sp[1] << 16) | (sp[2] >> 16); words[n++] = sp[2];
-    for (unsigned i = 3; i < 11; i++) words[n++] = sp[i];
-    for (u32 i = 0; i < 8000; i += 4) *(u32 *)(scr + i) = 0;
-    for (unsigned l = 0; l < n; l++) for (unsigned d = 0; d < 8; d++) {
-        unsigned nib = (words[l] >> (28 - 4 * d)) & 15;
-        for (unsigned y = 0; y < 7; y++) { u8 row = hexfont[nib][y]; for (unsigned x = 0; x < 5; x++) if (row & (16 >> x)) { unsigned px = 8 + d * 8 + x, py = 10 + l * 10 + y; scr[py * 40 + (px >> 3)] |= (u8)(0x80 >> (px & 7)); } }
-    }
-    R16(INTENA) = DMA_ALL; R16(DMACON) = DMA_ALL; R16(FMODE) = 0;
-    cop[32 + 1] = (u16)((u32)scr >> 16); cop[32 + 3] = (u16)((u32)scr);
-    for (unsigned p = 1; p < 8; p++) { cop[32 + p * 4 + 1] = 0; cop[32 + p * 4 + 3] = 0; }
-    R16(BPLCON0) = 0x1200; R16(BPLCON3) = 0x0C00; R16(BPL1MOD) = 0; R16(BPL2MOD) = 0;
-    R16(DDFSTRT) = 0x0038; R16(DDFSTOP) = 0x00D0; R16(DIWSTRT) = 0x2C81; R16(DIWSTOP) = 0x2CC1 | 0x1000; R16(DIWSTOP) = 0xF4C1;
-    R16(0x180) = 0x000; R16(0x182) = 0xFFF;
-    R32(COP1LC) = (u32)chip + CHIP_COP; R16(COPJMP1) = 0;
-    R16(DMACON) = SETBIT | DMAEN | BPLEN | COPEN;
-    for (;;) ;
-}
-
-static volatile u32 time_hi;       /* CIA-B timer A underflows (each 65536 E-clock cycles) */
-
-void plat_isr_ciab_c(void)
-{
-    dbg_n_ciab++;
-    u8 icr = CIAB(C_ICR);
-    if (icr & 0x01) time_hi++;
-    R16(INTREQ) = INT_EXTER;
-}
-
 /* palette: AGA 24-bit colours written in banks of 32 (high nibbles with LOCT = 0, low nibbles with LOCT = 1) */
 static u16 pal_hi[256], pal_lo[256];
 static volatile u8 pal_pending;
@@ -166,42 +137,36 @@ void plat_isr_vbl_c(void)
 #endif
     if (flip_pending) { front ^= 1; apply_bpl_ptrs(buf[front]); flip_pending = 0; }
     if (pal_pending) { load_palette(); pal_pending = 0; }
-    R16(INTREQ) = INT_VERTB;
 }
 
 /* ------------------------------------------------------------------------------------------- time */
 u32 plat_time_us(void)
 {
-    u32 h1, h2, lo;
-    do { h1 = time_hi; lo = 0xFFFF - (((u32)CIAB(C_TAHI) << 8) | CIAB(C_TALO)); h2 = time_hi; } while (h1 != h2);
-    /* E clock: PAL 709379 Hz (1.40969 us/tick), NTSC 715909 Hz (1.39679 us/tick): 65536 ticks = 92386 / 91541 us */
-    u32 whole = h1 * (is_pal ? 92386u : 91541u);
-    u32 frac = (u32)(((u64)lo * (is_pal ? 92386u : 91541u)) >> 16);
-    return whole + frac;
+    /* frame counter (our vertical-blank server) + raster position; monotonic */
+    static u32 last;
+    u32 c1, c2, line;
+    do { c1 = vbl_count; line = ((u32)(R16(0x004) & 1) << 8) | (R16(VHPOSR) >> 8); c2 = vbl_count; } while (c1 != c2);
+    u32 frame_us = is_pal ? 19968u : 16683u, lines = is_pal ? 312u : 262u;
+    u32 t = c1 * frame_us + (line * frame_us) / lines;
+    if ((s32)(t - last) < 0) t = last;
+    return last = t;
 }
 
 /* ------------------------------------------------------------------------------------------- input */
 static volatile u8 kq[64]; static volatile u8 kq_head, kq_tail;
-static void kbd_handshake(void)
+/* input.device handler: sees every raw key event (class 1, code in ie_Code, bit 7 = key up) before the rest of the system and queues it in the same form
+   the old CIA-A handler produced ((code << 1) | up), then lets the event continue. */
+struct ievent { struct ievent *next; u8 cls, sub; u16 code, qual; };
+void *input_handler_c(struct ievent *ev)
 {
-    unsigned n = 0; u8 last = (u8)(R16(VHPOSR) >> 8);
-    CIAA(C_CRA) = (u8)(CIAA(C_CRA) | 0x40);
-    while (n < 3) { u8 l = (u8)(R16(VHPOSR) >> 8); if (l != last) { last = l; n++; } }
-    CIAA(C_CRA) = (u8)(CIAA(C_CRA) & ~0x40);
+    for (struct ievent *e = ev; e; e = e->next)
+        if (e->cls == 1) {
+            u8 d = (u8)(((e->code & 0x7F) << 1) | ((e->code >> 7) & 1));
+            u8 h = kq_head, nh = (u8)((h + 1) & 63);
+            if (nh != kq_tail) { kq[h] = d; kq_head = nh; }
+        }
+    return ev;
 }
-void plat_isr_ports_c(void)
-{
-    dbg_n_ports++;
-    u8 icr = CIAA(C_ICR); dbg_n_aud = (dbg_n_aud & 0xFF00FFFFu) | ((u32)icr << 16); if (icr & 8) dbg_n_aud++; dbg_n_def = R16(INTREQR) | ((u32)R16(INTENAR) << 16);
-    if (icr & 0x08) {
-        u8 d = (u8)~CIAA(C_SDR);
-        kbd_handshake();
-        u8 h = kq_head, nh = (u8)((h + 1) & 63);
-        if (nh != kq_tail) { kq[h] = d; kq_head = nh; }
-    }
-    R16(INTREQ) = INT_PORTS;
-}
-void plat_isr_audio_c(void) { dbg_n_aud++; R16(INTREQ) = 0x0780; }
 
 /* Amiga raw key -> PC scan code (set 1).  0xFF = unmapped.  bit 7 of the result = extended (E0 prefix). */
 static const u8 amiga2pc[0x68] = {
@@ -292,7 +257,6 @@ static void dbg_hex2(unsigned col, unsigned row, u32 v)
 }
 #endif
 #ifdef DEBUGBAR
-static u32 dbg_disk_word(void);
 static u16 prof[8192], top_tmp[6], top_idx[6];
 static void dbg_bar_draw(void)
 {
@@ -308,7 +272,7 @@ static void dbg_bar_draw(void)
         for (unsigned r = 0; r < 6; r++) prof[top_idx[r]] = top_tmp[r];
     }
     dbg_hex(8, dbg_pc - boot_fast); dbg_hex(60, polls); dbg_hex(112, vbl_count); dbg_hex(164, plat_time_us());
-    dbg_hex(216, (rt_dbg_last << 16) | (rt_dbg_nint & 0xFFFF)); dbg_hex(268, dbg_disk_word());
+    dbg_hex(216, (rt_dbg_last << 16) | (rt_dbg_nint & 0xFFFF)); dbg_hex(268, 0);
     dbg_hex2(8, 8, dbg_n_ports); dbg_hex2(60, 8, dbg_n_ciab); dbg_hex2(112, 8, dbg_n_aud); dbg_hex2(164, 8, rt_dbg_exit_code); dbg_hex2(216, 8, dbg_conv_total); dbg_hex2(268, 8, (dbg_aud_pushes << 16) | dbg_aud_peak);
     for (unsigned y = 0; y < 32; y++) { c2p_row320(dbgrows + y * 320, buf[0] + (200 + y) * ROW_BYTES); c2p_row320(dbgrows + y * 320, buf[1] + (200 + y) * ROW_BYTES); }
 }
@@ -357,104 +321,28 @@ static void display_update(void)
     flip_pending = 1;
 }
 
-/* ------------------------------------------------------------------------------------------- IDE data disk (Gayle, PIO, LBA) */
-#define IDE_BASE 0xDA0000u
-#define IDE_DATA (*(volatile u16 *)(IDE_BASE + 0x0000))
-#define IDE_REG(n) (*(volatile u8 *)(IDE_BASE + 0x2000 + (n) * 4))
-#define IDE_ERR 1
-#define IDE_COUNT 2
-#define IDE_SECT 3
-#define IDE_CYLLO 4
-#define IDE_CYLHI 5
-#define IDE_HEAD 6
-#define IDE_STATUS 7
-#define IDE_ALT (*(volatile u8 *)(IDE_BASE + 0x3018))
-
-#define GAYLE_IRQ (*(volatile u8 *)0xDA9000)
-#define GAYLE_INTENA (*(volatile u8 *)0xDAA000)
-static void ide_quiet(void)
-{
-    IDE_ALT = 0x02;                       /* nIEN: the drive does not raise its interrupt line */
-    GAYLE_INTENA = 0;                     /* and Gayle does not forward it to INT2 */
-    GAYLE_IRQ = 0x7C;                     /* acknowledge what is latched (A1200 Gayle: write 0 bits to clear) */
-}
-static int ide_wait(u8 mask, u8 want)
-{
-    for (u32 n = 0; n < 4000000u; n++) { u8 s = IDE_REG(IDE_STATUS); if (!(s & 0x80) && (s & mask) == want) return 0; }
-    return -1;
-}
-static int ide_read_sector(u32 lba, u8 *dst)
-{
-    IDE_REG(IDE_HEAD) = (u8)(0xE0 | ((lba >> 24) & 15));
-    for (volatile int d = 0; d < 200; d++) (void)IDE_REG(IDE_STATUS);
-    if (ide_wait(0x40, 0x40)) return -1;
-    IDE_REG(IDE_COUNT) = 1; IDE_REG(IDE_SECT) = (u8)lba; IDE_REG(IDE_CYLLO) = (u8)(lba >> 8); IDE_REG(IDE_CYLHI) = (u8)(lba >> 16);
-    IDE_REG(IDE_STATUS) = 0x20;
-    if (ide_wait(0x08, 0x08)) return -2;
-    volatile u16 *p = &IDE_DATA; u16 *d = (u16 *)dst;
-    for (unsigned i = 0; i < 256; i++) d[i] = *p;
-    (void)IDE_REG(IDE_STATUS);
-    ide_quiet();
-    return 0;
-}
-
-struct hfile { char name[16]; u32 lba, size, pos; } files_tab[8];
-static u32 nfiles; static u8 sector[512] __attribute__((aligned(4))); static u32 sector_lba = 0xFFFFFFFFu;
-static int disk_ok;
-int dbg_disk_rc = 99;
-static u32 disk_base;
-static void disk_init(void)
-{
-    /* the table sits at LBA 0 of a raw image, but emulators/adapters may put a (virtual) RDB in front: scan for the signature */
-    ide_quiet();
-    for (u32 l = 0; l < 8192; l++) {
-        dbg_disk_rc = ide_read_sector(l, sector); if (dbg_disk_rc) return;
-        if (sector[0] == 'A' && sector[1] == 'R' && sector[2] == 'C' && sector[3] == 'H') { disk_base = l; sector_lba = l; goto found; }
-    }
-    return;
-found:
-    nfiles = sector[4]; if (nfiles > 8) nfiles = 8;
-    for (u32 i = 0; i < nfiles; i++) {
-        const u8 *e = sector + 16 + i * 32;
-        for (unsigned k = 0; k < 16; k++) files_tab[i].name[k] = (char)e[k];
-        files_tab[i].lba = disk_base + (((u32)e[16] << 24) | ((u32)e[17] << 16) | ((u32)e[18] << 8) | e[19]);
-        files_tab[i].size = ((u32)e[20] << 24) | ((u32)e[21] << 16) | ((u32)e[22] << 8) | e[23];
-        files_tab[i].pos = 0;
-    }
-    disk_ok = 1;
-}
-#ifdef DEBUGBAR
-static u32 dbg_disk_word(void) { return ((u32)(dbg_disk_rc & 0xFF) << 24) | (nfiles << 16) | ((u32)IDE_REG(IDE_STATUS) << 8) | sector[0]; }
-#endif
-static int streq_ci(const char *a, const char *b)
-{
-    for (;; a++, b++) { char x = *a, y = *b; if (x >= 'A' && x <= 'Z') x += 32; if (y >= 'A' && y <= 'Z') y += 32; if (x != y) return 0; if (!x) return 1; }
-}
+/* ------------------------------------------------------------------------------------------- data files through AmigaDOS (any drive type) */
+#define DOS_OPEN (-30)
+#define DOS_CLOSE (-36)
+#define DOS_READ (-42)
+#define DOS_WRITE (-48)
+#define DOS_SEEK (-66)
+#define DOS(lvo, d1, d2, d3) os_call((void *)dosbase, lvo, 0, d1, d2, d3, 0, 0)
 long plat_file_open(const char *name)
 {
-    for (u32 i = 0; i < nfiles; i++) if (streq_ci(name, files_tab[i].name)) { files_tab[i].pos = 0; return (long)i; }
-    return -1;
+    char p[80] = "SYS:"; unsigned n = 4;
+    for (unsigned i = 0; name[i] && n < 78; i++) p[n++] = name[i];
+    p[n] = 0;
+    long fh = (long)DOS(DOS_OPEN, (u32)p, 1005, 0);                 /* MODE_OLDFILE */
+    return fh ? fh : -1;
 }
-void plat_file_close(long h) { (void)h; }
+void plat_file_close(long h) { DOS(DOS_CLOSE, (u32)h, 0, 0); }
 long plat_file_seek(long h, long off, int whence)
 {
-    struct hfile *f = &files_tab[h]; long p = whence == 0 ? off : whence == 1 ? (long)f->pos + off : (long)f->size + off;
-    if (p < 0) p = 0; f->pos = (u32)p; return p;
+    DOS(DOS_SEEK, (u32)h, (u32)off, whence == 0 ? (u32)-1 : whence == 1 ? 0u : 1u);        /* OFFSET_BEGINNING / CURRENT / END */
+    return (long)DOS(DOS_SEEK, (u32)h, 0, 0);                         /* Seek returns the OLD position: ask again for the new one */
 }
-long plat_file_read(long h, void *buf_, u32 n)
-{
-    struct hfile *f = &files_tab[h]; u8 *d = buf_; u32 done = 0;
-    if (f->pos >= f->size) return 0;
-    if (n > f->size - f->pos) n = f->size - f->pos;
-    while (done < n) {
-        u32 abs = f->pos + done, lba = f->lba + (abs >> 9), off = abs & 511, take = 512 - off;
-        if (take > n - done) take = n - done;
-        if (lba != sector_lba) { if (ide_read_sector(lba, sector)) return done ? (long)done : -1; sector_lba = lba; }
-        for (u32 k = 0; k < take; k++) d[done + k] = sector[off + k];
-        done += take;
-    }
-    f->pos += done; return (long)done;
-}
+long plat_file_read(long h, void *buf_, u32 n) { return (long)DOS(DOS_READ, (u32)h, (u32)buf_, n); }
 
 /* ------------------------------------------------------------------------------------------- audio (set up in snd.c later) */
 /* Paula: ring buffers (channel 0 = left, channel 1 = right) that loop forever; the game's Sound Blaster blocks are converted to signed 8-bit and
@@ -535,17 +423,13 @@ static u16 measure_lines(void)
 
 static void hw_reset(void)
 {
-    R16(INTENA) = DMA_ALL; R16(INTREQ) = DMA_ALL; R16(DMACON) = DMA_ALL; R16(ADKCON) = DMA_ALL; R16(INTREQ) = DMA_ALL;
+    /* the system keeps running: touch only what the game owns (display, sprites, audio, the pot/button lines) */
+    R16(DMACON) = 0x0020;                                  /* sprite DMA off (no system pointer) */
     for (int i = 0; i < 4; i++) { R16(AUDx(i, 8)) = 0; R16(AUDx(i, 4)) = 1; R16(AUDx(i, 6)) = 124; }
     for (int i = 0; i < 8; i++) { R16(SPRx(i, 0)) = 0; R16(SPRx(i, 4)) = 0; R16(SPRx(i, 6)) = 0; R16(SPRx(i, 2)) = 0; }
     R16(FMODE) = 0; R16(BPLCON0) = 0x0200; R16(BPLCON1) = 0; R16(BPLCON2) = 0; R16(BPLCON3) = BPLCON3_BASE; R16(BPLCON4) = BPLCON4_BASE;
     R16(CLXCON) = 0; R16(CLXCON2) = 0; R16(BPL1MOD) = 0; R16(BPL2MOD) = 0; R16(COLOR00) = 0;
     R16(POTGO) = 0xFF00;
-    CIAA(C_ICR) = 0x7F; CIAA(C_CRA) = 0; CIAA(C_CRB) = 0; (void)CIAA(C_ICR);
-    CIAA(C_DDRA) = 0x03; CIAA(C_PRA) = (u8)(CIAA(C_PRA) & ~0x01u);
-    CIAB(C_ICR) = 0x7F; CIAB(C_CRA) = 0; CIAB(C_CRB) = 0; (void)CIAB(C_ICR);
-    CIAB(C_DDRB) = 0xFF; CIAB(C_PRB) = 0xFF; CIAB(C_PRB) = 0xF7; CIAB(C_PRB) = 0xFF;
-    R16(INTREQ) = DMA_ALL;
 }
 
 /* ------------------------------------------------------------------------------------------- fatal-error screen (5x7 font, upper case) */
@@ -603,7 +487,6 @@ extern void rt_isr_return(void);
 #include "layout.h"
 
 static struct ctx ctx;
-static void set_vec(unsigned n, void (*f)(void)) { vectors[n] = (u32)f; }
 
 static inline void dbg(u16 c) { R16(COLOR00) = c; }
 #ifndef DBG_STOP
@@ -612,6 +495,7 @@ static inline void dbg(u16 c) { R16(COLOR00) = c; }
 #define STOP(n, col) do { if (DBG_STOP == (n)) { R16(DMACON) = DMA_ALL; R16(BPLCON0) = 0x0200; R16(BPLCON3) = BPLCON3_BASE; for (;;) R16(COLOR00) = (col); } } while (0)
 void amiga_main(void)
 {
+    { const u32 *bi = (const u32 *)(boot_chip + 0x3FF00); sysbase = bi[0]; dosbase = bi[1]; gfxbase = bi[2]; oldview = bi[3]; }
     hw_reset();
     dbg(0x0A0A); STOP(1, 0x0F00);
     chip = (u8 *)boot_chip;
@@ -647,26 +531,28 @@ void amiga_main(void)
     R32(COP1LC) = (u32)chip + CHIP_COP; R16(COPJMP1) = 0;
     STOP(3, 0x000F);
 
-    /* exception vectors in chip RAM at 0 */
-    for (unsigned i = 0; i < 256; i++) vectors[i] = (u32)isr_default;
-    { extern u32 exc_table[]; for (unsigned i = 0; i < 48; i++) vectors[i] = exc_table[i]; }
-    set_vec(26, isr_ports);       /* level 2 */
-    set_vec(27, isr_vbl);         /* level 3 */
-    set_vec(28, isr_aud);         /* level 4 */
-    set_vec(30, isr_ciab);        /* level 6 */
-    { u32 *v0 = (u32 *)0; for (unsigned i = 0; i < 64; i++) v0[i] = vectors[i]; }
-    vectors[0] = boot_chip + boot_chip_size;                                        /* (unused) */
-
-    /* time base: CIA-B timer A free-running at the E clock, underflow interrupt counts the high part */
-    CIAB(C_CRB) = 0x00; CIAB(C_TALO) = 0xFF; CIAB(C_TAHI) = 0xFF; CIAB(C_CRA) = 0x11; (void)CIAB(C_ICR); CIAB(C_ICR) = 0x81;
-    kbd_handshake(); (void)CIAA(C_ICR); CIAA(C_ICR) = 0x88;
+    /* system hooks: vertical-blank server (frame flips, palette, clock) and an input.device handler (keyboard) */
+    {
+        static struct __attribute__((packed, aligned(2))) intr { u32 succ, pred; u8 type, pri; u32 name, data, code; } vbl_is, inp_is;     /* struct Interrupt */
+        static const char vname[] = "ArchonUltra VBL", iname[] = "ArchonUltra keys";
+        vbl_is.type = 2; vbl_is.pri = 50; vbl_is.name = (u32)vname; vbl_is.data = 0; vbl_is.code = (u32)vbl_server;
+        EXEC(-168, 5, 0, 0, (u32)&vbl_is);                     /* AddIntServer(INTB_VERTB, &is) */
+        u32 port = EXEC(-666, 0, 0, 0, 0);                    /* CreateMsgPort */
+        u32 io = port ? EXEC(-654, 48, 0, port, 0) : 0;       /* CreateIORequest(port, sizeof IOStdReq) */
+        static const char indev[] = "input.device";
+        if (io && !EXEC(-444, 0, 0, (u32)indev, io)) {        /* OpenDevice("input.device", 0, io, 0) */
+            inp_is.type = 2; inp_is.pri = 100; inp_is.name = (u32)iname; inp_is.data = 0; inp_is.code = (u32)input_handler;
+            *(volatile u16 *)(io + 28) = 9;                   /* IND_ADDHANDLER */
+            *(volatile u32 *)(io + 40) = (u32)&inp_is;         /* io_Data */
+            EXEC(-456, 0, 0, 0, io);                          /* DoIO */
+        }
+    }
     mouse_px = (u8)R16(JOY0DAT); mouse_py = (u8)(R16(JOY0DAT) >> 8);
 
     STOP(4, 0x0FF0);
     pal_pending = 0;
-    R16(INTREQ) = DMA_ALL;
     R16(DMACON) = SETBIT | DMAEN | BPLEN | COPEN | BLTEN;
-    R16(INTENA) = SETBIT | INT_INTEN | INT_EXTER | INT_VERTB | INT_PORTS;
+    R16(INTENA) = SETBIT | INT_INTEN | INT_VERTB;
 
     STOP(5, 0x0F0F);
     /* ---------------------------------------------------------------- the PC world */
@@ -680,16 +566,12 @@ void amiga_main(void)
     for (u32 i = 0; i < obj2_len; i++) w[OBJ2_BASE + i] = obj2_data[i];
     for (u32 i = 0; i < obj3_len; i++) w[OBJ3_BASE + i] = obj3_data[i];
     dbg(0x0F80);
-    disk_init();
-    if (!disk_ok) fatal("DATA DISK NOT FOUND", "THE GAME DATA IS READ FROM", "THE A1200 IDE PORT. ATTACH", "THE HDF AS AN IDE DRIVE", "NOT AS A UAE HARDFILE", ((u32)(dbg_disk_rc & 0xFF) << 24) | (nfiles << 16) | ((u32)IDE_REG(IDE_STATUS) << 8));
     dbg(0x0F00);
     rt_init(w, &ctx);
     rt_build_xl_tab();
     xl_tab[XL_SENTINEL_OFF] = (u32)rt_isr_return;
     dbg(0x00F0); STOP(6, 0x0FFF);
 
-    /* master mode: interrupts then use the interrupt stack and never touch the x86 stack */
-    __asm__ volatile("move.l %0,%%d0\n\tmovec %%d0,%%msp\n\tmove.w #0x3000,%%sr" : : "r"(boot_chip + 0x3F000) : "d0", "memory");
     rt_enter(w, &ctx, OBJ3_ESP_TOP, (void *)xl_entry);
     fatal("THE GAME HAS EXITED", "", "", "", "", rt_dbg_last);
     for (;;) R16(COLOR00) = 0x00F0;
