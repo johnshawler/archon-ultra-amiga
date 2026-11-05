@@ -39,8 +39,9 @@ static u8 cmos_idx, cmos[128];
 u32 hw_dbg3(void) { return now - rtc_last_us; }
 u32 hw_dbg2(void) { return (imr[0] << 24) | (imr[1] << 16) | (cmos[0x0B] << 8) | cmos[0x0A]; }
 int hw_irq_pending(void) { return pic_next() >= 0; }
+static u32 irq0_acks;
 int hw_irq_ack(void) {
-    int irq = pic_next(); if (irq < 0) return -1;
+    int irq = pic_next(); if (irq < 0) return -1; if (irq == 0) irq0_acks++;
     int c = irq >> 3, b = irq & 7;
     irr[c] &= ~(1 << b); isr[c] |= 1 << b; if (c == 1) isr[0] |= 4;
     return vbase[c] + b;
@@ -326,3 +327,5 @@ void hw_advance(u32 t) {
 u32 hw_now(void) { return now; }
 
 void hw_rtc_flag(void) { cmos[0x0C] |= 0xC0; }
+u32 hw_dbg4(void) { return (irq0_acks << 16) | (pit[0].reload & 0xFFFF); }
+u32 hw_dbg5(void) { return ((u32)pit[0].mode << 24) | ((now - pit[0].phase_us) & 0xFFFFFF); }
