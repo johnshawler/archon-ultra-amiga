@@ -228,20 +228,19 @@ static void sb_advance(void) {
 
 /* ---- VGA retrace */
 u32 vga_vretrace_state(void) {
-    u32 frame_us = 14268, line_us = 32;
+    /* DOSBox's model for the 320x200 unchained mode (449 lines in 14268 us): vsync = lines 412..414 (bit 3), vertical blank = from line 400 (bit 0),
+       horizontal blank = the last part of every line (bit 0).  The game phase-locks its timer to these edges, so the live clock is used. */
+    const u32 frame_us = 14268, lines = 449;
 #ifndef HOSTED
-    u32 t = plat_time_us() % frame_us;                 /* the status port is polled in tight loops: use the live clock, not the one cached at the last poll */
+    u32 t = plat_time_us() % frame_us;
 #else
     u32 t = now % frame_us;
 #endif
-    u32 line = t / line_us, in_line = t % line_us;
+    u32 lt = t * lines;                                    /* position in units of 1/449 us-lines: line = lt / frame_us */
     u32 r = 0;
-#ifndef HOSTED
-    if (line >= 412 && line < 430) r |= 8;            /* wider than the real 2 lines: tolerant of a slow polling loop (the display itself is flipped independently) */
-#else
-    if (line >= 412 && line < 414) r |= 8;
-#endif
-    if (r || in_line >= 26) r |= 1;
+    if (lt >= 412 * frame_us && lt <= 414 * frame_us) r |= 8;
+    if (lt >= 400 * frame_us) r |= 1;
+    else if ((lt % frame_us) >= (frame_us * 13) / 16) r |= 1;
     return r;
 }
 

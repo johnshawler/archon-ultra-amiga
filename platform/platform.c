@@ -142,12 +142,13 @@ void plat_isr_vbl_c(void)
 /* ------------------------------------------------------------------------------------------- time */
 u32 plat_time_us(void)
 {
-    /* frame counter (our vertical-blank server) + raster position; monotonic */
+    /* frame counter (our vertical-blank server) + the beam position (vertical line and horizontal colour clock, read atomically); monotonic */
     static u32 last;
-    u32 c1, c2, line;
-    do { c1 = vbl_count; line = ((u32)(R16(0x004) & 1) << 8) | (R16(VHPOSR) >> 8); c2 = vbl_count; } while (c1 != c2);
+    u32 c1, c2, v;
+    do { c1 = vbl_count; v = R32(0x004); c2 = vbl_count; } while (c1 != c2);
+    u32 line = (((v >> 16) & 1) << 8) | ((v >> 8) & 0xFF), hpos = v & 0xFF; if (hpos > 226) hpos = 226;
     u32 frame_us = is_pal ? 19968u : 16683u, lines = is_pal ? 312u : 262u;
-    u32 t = c1 * frame_us + (line * frame_us) / lines;
+    u32 t = c1 * frame_us + ((line * 227u + hpos) * frame_us) / (lines * 227u);
     if ((s32)(t - last) < 0) t = last;
     return last = t;
 }
