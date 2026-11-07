@@ -44,7 +44,13 @@ static void kscript(u32 frame) {
     if (!init) { init = 1; const char *e = getenv("KSCRIPT"); while (e && *e && n < 256) { unsigned f, c; int l; if (sscanf(e, "%u:%x%n", &f, &c, &l) != 2) break; k[n].f = f; k[n].sc = c; n++; e += l; if (*e == ',') e++; } }
     for (int i = 0; i < n; i++) if (k[i].f == frame) { hw_key(k[i].sc); plat_log("harness: key %02x at frame %u\n", k[i].sc, frame); }
 }
+static void jscript(u32 frame) {
+    static int init, n; static struct { u32 f, b; } j[128];
+    if (!init) { init = 1; const char *e = getenv("JSCRIPT"); while (e && *e && n < 128) { unsigned f, b; int l; if (sscanf(e, "%u:%u%n", &f, &b, &l) != 2) break; j[n].f = f; j[n].b = b; n++; e += l; if (*e == ',') e++; } }
+    for (int i = 0; i < n; i++) if (j[i].f == frame) { rt_joy_bits = j[i].b; plat_log("harness: joy %u at frame %u\n", j[i].b, frame); }
+}
 void plat_vsync(u32 frame) {
+    jscript(frame);
     kscript(frame);
     mscript(frame); if (frame % 500 == 0) { extern u32 rt_dbg_pc; plat_log("harness: frame %u reads %08x bytes %08x pc %08x vga %08x\n", frame, rd_hash, rd_bytes, rt_dbg_pc, prev_hash); }
     u32 start, pitch; int c4; vga_get_display(&start, &pitch, &c4);

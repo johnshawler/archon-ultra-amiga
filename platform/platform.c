@@ -243,7 +243,21 @@ static void input_poll(void)
         u8 code = (d >> 1) & 0x7F, up = d & 1;
         if (code < 0x68) push_scan(amiga2pc[code], up);
     }
-    rt_joy_bits = joy_read();                       /* the game reads the joystick through port 0x201 */
+    /* a direction is held for at least 5 frames (100 ms) so that the game's slow joystick polling cannot miss a tap; the same state also drives the arrow keys
+       (Keyboard mode of the Dark side) */
+    { static u32 hold_until[4]; u8 raw = joy_read(), j = raw & 0x30;
+      for (unsigned k = 0; k < 4; k++) { if (raw & (1u << k)) hold_until[k] = vbl_count + 5; if ((s32)(hold_until[k] - vbl_count) > 0) j |= (u8)(1u << k); }
+      u8 ch = (u8)(j ^ joy_prev);
+      if (ch) {
+        if (ch & J_UP) push_scan(0xC8, !(j & J_UP));
+        if (ch & J_DOWN) push_scan(0xD0, !(j & J_DOWN));
+        if (ch & J_LEFT) push_scan(0xCB, !(j & J_LEFT));
+        if (ch & J_RIGHT) push_scan(0xCD, !(j & J_RIGHT));
+        if (ch & J_FIRE) push_scan(0x52, !(j & J_FIRE));
+        if (ch & J_FIRE2) push_scan(0x53, !(j & J_FIRE2));
+        joy_prev = j;
+      }
+      rt_joy_bits = j; }                            /* the game reads the joystick through port 0x201 */
     mouse_update();
 }
 
@@ -285,9 +299,10 @@ static void dbg_bar_draw(void)
 {
     /* one line, redrawn every 16th frame: stays cheap enough not to change the timing of the game */
     if ((vbl_count & 15) != 0) return;
-    dbg_hex(8, vbl_count); dbg_hex(60, hw_dbg4()); dbg_hex(112, (rt_dbg_last << 16) | (rt_dbg_nint & 0xFFFF)); dbg_hex(164, rd_hash); dbg_hex(216, rt_dbg_pc - boot_fast); dbg_hex(268, rd_bytes);
+    dbg_hex(8, vbl_count); dbg_hex(60, hw_dbg4()); dbg_hex(112, (rt_dbg_last << 16) | (rt_dbg_nint & 0xFFFF)); dbg_hex(164, (rt_joy_bits << 24) | (dbg_keys & 0xFFFFFF)); dbg_hex(216, rt_dbg_pc - boot_fast); dbg_hex(268, rd_bytes);
     if (rt_dbg_exit_code) { dbg_hex2(164, 16, rt_dbg_exit_code); dbg_hex2(216, 16, rt_dbg_exit_a); dbg_hex2(268, 16, rt_dbg_exit_b); }
-    for (unsigned i = 0; i < 3; i++) dbg_hex2(8 + 52 * i, 16, ipc_ring[(ipc_n + i) % 6]);
+    for (unsigned i = 0; i < 2; i++) dbg_hex2(8 + 52 * i, 16, ipc_ring[(ipc_n + i) % 6]);
+    { extern u32 rt_mouse_dbg(void); dbg_hex2(112, 16, rt_mouse_dbg()); }
     if (dbg_regs) for (unsigned i = 0; i < 6; i++) dbg_hex2(8 + 52 * i, 8, dbg_regs[i == 4 ? 5 : i == 5 ? 6 : i]);
     for (unsigned y = 0; y < 24; y++) { c2p_row320(dbgrows + y * 320, buf[0] + (200 + y) * ROW_BYTES); c2p_row320(dbgrows + y * 320, buf[1] + (200 + y) * ROW_BYTES); }
 }
@@ -405,12 +420,33 @@ void plat_vsync(u32 frame) { (void)frame; }
 /* test-only scripted mouse (game time ms, x, y in the game's 640x200 mouse space, buttons): the positions the reference run clicked:
    both players "Computer", then START */
 static const struct { u32 ms; u16 x, y; u8 b; } tm[] = {
-    {45000,240,109,0},{45500,240,109,1},{46000,240,109,0},          /* Light: Mouse */
-    {47500,254,153,0},{48000,254,153,1},{48500,254,153,0},          /* Light START */
-    {75000,310,135,0},{75500,310,135,1},{76000,310,135,0},          /* select the e-pawn */
-    {78000,310,105,0},{78500,310,105,1},{79000,310,105,0},          /* move it forward */
-    {85000,230,135,0},{85500,230,135,1},{86000,230,135,0},
-    {88000,230,105,0},{88500,230,105,1},{89000,230,105,0},
+    {45000,240,90,0},
+    {45500,240,90,1},
+    {46000,240,90,0},
+    {46500,406,70,0},
+    {47000,406,70,1},
+    {47500,406,70,0},
+    {49000,254,153,0},
+    {49500,254,153,1},
+    {50000,254,153,0},
+    {60000,240,90,0},
+    {60500,240,90,1},
+    {61000,240,90,0},
+    {61500,406,70,0},
+    {62000,406,70,1},
+    {62500,406,70,0},
+    {64000,254,153,0},
+    {64500,254,153,1},
+    {65000,254,153,0},
+    {75000,240,90,0},
+    {75500,240,90,1},
+    {76000,240,90,0},
+    {76500,406,70,0},
+    {77000,406,70,1},
+    {77500,406,70,0},
+    {79000,254,153,0},
+    {79500,254,153,1},
+    {80000,254,153,0},
 };
 static void test_keys(void)
 {

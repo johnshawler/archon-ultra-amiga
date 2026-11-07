@@ -385,6 +385,7 @@ void rt_init(u8 *win, struct ctx *ctx) {
 }
 /* relative movement from the platform (the driver clamps the logical pointer; INT 33h function 4 repositions it) */
 void rt_mouse_move(int dx, int dy, u32 b) { int x = (int)mouse_x + dx, y = (int)mouse_y + dy; if (x < 0) x = 0; if (x > 639) x = 639; if (y < 0) y = 0; if (y > 199) y = 199; mouse_x = (u32)x; mouse_y = (u32)y; mouse_b = b; }
+u32 rt_mouse_dbg(void) { return (mouse_x << 20) | (mouse_y << 8) | mouse_b; }
 void rt_mouse_set(u32 x, u32 y, u32 b) { mouse_x = x; mouse_y = y; mouse_b = b; }
 
 #ifdef HOSTED
