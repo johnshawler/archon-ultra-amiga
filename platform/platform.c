@@ -134,9 +134,11 @@ static u32 ipc_ring[6]; static u32 ipc_n;
 static void sample_ipc(u16 *w);
 #endif
 extern u32 boot_fast, boot_fast_size;
+static void mouse_accum(void);
 void plat_isr_vbl_c(u32 *sp)
 {
     vbl_count++;
+    mouse_accum();
 #ifdef DEBUGBAR
     sample_ipc((u16 *)sp);
     dbg_bar_draw();
@@ -217,7 +219,7 @@ static u8 joy_read(void)
 }
 /* mouse (port 1): position in the DOS mouse coordinate system */
 static u8 mouse_px, mouse_py; static int mouse_x = 320, mouse_y = 100;
-static void mouse_update(void)
+static void mouse_accum(void)       /* called from the 50 Hz vertical-blank server: the 8-bit hardware counters must be read often enough not to wrap */
 {
     u16 m = R16(JOY0DAT); u8 x = (u8)m, y = (u8)(m >> 8);
     s8 dx = (s8)(x - mouse_px), dy = (s8)(y - mouse_py);
@@ -225,6 +227,9 @@ static void mouse_update(void)
     mouse_x += dx * 2; mouse_y += dy;
     if (mouse_x < 0) mouse_x = 0; if (mouse_x > 639) mouse_x = 639;
     if (mouse_y < 0) mouse_y = 0; if (mouse_y > 199) mouse_y = 199;
+}
+static void mouse_update(void)
+{
     u32 b = 0;
     if (!(CIAA(C_PRA) & 0x40)) b |= 1;
     if (!(R16(POTGOR) & 0x0400)) b |= 2;
@@ -549,6 +554,19 @@ void amiga_main(void)
         R16(FMODE) = 0x0001;
         R16(BPLCON0) = BPLCON0_8PL; R16(BPLCON1) = 0; R16(BPLCON2) = 0; R16(BPLCON3) = BPLCON3_BASE; R16(BPLCON4) = BPLCON4_BASE;
         R16(BPL1MOD) = 280; R16(BPL2MOD) = 280;
+        /* the copper re-establishes the whole display set-up at the top of every frame, so nothing the OS does to the custom registers can leak into the picture (inverted colours: BPLCON4 XOR bits) */
+        static const u16 rg[][2] = {
+            {DIWSTRT, 0}, {DIWSTOP, 0}, {DIWHIGH, 0}, {DDFSTRT, 0x0038}, {DDFSTOP, 0x00C8}, {FMODE, 0x0001}, {BPLCON0, BPLCON0_8PL}, {BPLCON1, 0}, {BPLCON2, 0},
+            {BPLCON3, BPLCON3_BASE}, {BPLCON4, BPLCON4_BASE}, {BPL1MOD, 280}, {BPL2MOD, 280}, {CLXCON, 0}, {CLXCON2, 0} };
+        unsigned n = 64;
+        for (unsigned i = 0; i < sizeof rg / sizeof rg[0]; i++) {
+            u16 v = rg[i][1];
+            if (rg[i][0] == DIWSTRT) v = (u16)(((vs & 0xFF) << 8) | 0x81);
+            if (rg[i][0] == DIWSTOP) v = (u16)(((ve & 0xFF) << 8) | 0xC1);
+            if (rg[i][0] == DIWHIGH) v = (u16)((1u << 13) | (((ve >> 8) & 7) << 8) | ((vs >> 8) & 7));
+            cop[n++] = rg[i][0]; cop[n++] = v;
+        }
+        cop[n++] = 0xFFFF; cop[n++] = 0xFFFE;
     }
     R32(COP1LC) = (u32)chip + CHIP_COP; R16(COPJMP1) = 0;
     STOP(3, 0x000F);
@@ -557,7 +575,7 @@ void amiga_main(void)
     {
         static struct __attribute__((packed, aligned(2))) intr { u32 succ, pred; u8 type, pri; u32 name, data, code; } vbl_is, inp_is;     /* struct Interrupt */
         static const char vname[] = "ArchonUltra VBL", iname[] = "ArchonUltra keys";
-        vbl_is.type = 2; vbl_is.pri = 50; vbl_is.name = (u32)vname; vbl_is.data = 0; vbl_is.code = (u32)vbl_server;
+        vbl_is.type = 2; vbl_is.pri = -100; vbl_is.name = (u32)vname; vbl_is.data = 0; vbl_is.code = (u32)vbl_server;
         EXEC(-168, 5, 0, 0, (u32)&vbl_is);                     /* AddIntServer(INTB_VERTB, &is) */
         u32 port = EXEC(-666, 0, 0, 0, 0);                    /* CreateMsgPort */
         u32 io = port ? EXEC(-654, 48, 0, port, 0) : 0;       /* CreateIORequest(port, sizeof IOStdReq) */
