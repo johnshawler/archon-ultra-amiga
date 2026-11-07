@@ -81,7 +81,7 @@ void plat_exit(int code) { (void)code; for (;;) R16(COLOR00) = (u16)(0x0F00 | (c
 #define CHIP_BUF1 0x22000
 #define ROW_BYTES 320            /* 8 planes x 40 bytes per line */
 #ifdef DEBUGBAR
-#define SCR_H 208
+#define SCR_H 224
 #else
 #define SCR_H 200
 #endif
@@ -129,10 +129,16 @@ static void apply_bpl_ptrs(const u8 *b)
 #ifdef DEBUGBAR
 static void dbg_bar_draw(void);
 #endif
-void plat_isr_vbl_c(void)
+#ifdef DEBUGBAR
+static u32 ipc_ring[6]; static u32 ipc_n;
+static void sample_ipc(u16 *w);
+#endif
+extern u32 boot_fast, boot_fast_size;
+void plat_isr_vbl_c(u32 *sp)
 {
     vbl_count++;
 #ifdef DEBUGBAR
+    sample_ipc((u16 *)sp);
     dbg_bar_draw();
 #endif
     if (flip_pending) { front ^= 1; apply_bpl_ptrs(buf[front]); flip_pending = 0; }
@@ -244,14 +250,25 @@ static void input_poll(void)
 /* ------------------------------------------------------------------------------------------- display */
 static u32 shown_gen = 0xFFFFFFFFu;
 #ifdef DEBUGBAR
-extern u32 dbg_pc; extern u32 dbg_keys;
+extern u32 dbg_pc; extern u32 dbg_keys; extern u32 rd_hash, rd_bytes;
 extern u32 hw_dbg1(void), hw_dbg2(void), hw_dbg3(void), hw_dbg4(void), hw_dbg5(void), rt_dbg_iflag;
 extern u32 rt_dbg_hist[32], rt_dbg_exit_code, rt_dbg_exit_a, rt_dbg_exit_b;
 extern u32 rt_dbg_port, rt_dbg_pc;
 extern u32 hw_dbg1(void), hw_dbg2(void);
 extern u32 rt_dbg_last, rt_dbg_nint, rt_dbg_irq, rt_dbg_a, rt_dbg_b, rt_dbg_n5;
 static u8 dbgrows[32 * 320] __attribute__((aligned(4)));
-static u32 polls;
+static u32 polls; static u32 *dbg_regs;
+static void sample_ipc(u16 *w)
+{
+    /* the interrupted user-mode PC: the 68030 exception frame is SR.w PC.l vector-offset.w (0x006C for the level-3 autovector) */
+    for (unsigned k = 0; k < 120; k++) {
+        if (w[k + 3] == 0x006C && !(w[k] & 0x2000)) {
+            u32 pc = ((u32)w[k + 1] << 16) | w[k + 2];
+            if (pc >= boot_fast && pc < boot_fast + boot_fast_size) { ipc_ring[ipc_n++ % 6] = pc - boot_fast; return; }
+        }
+    }
+    ipc_ring[ipc_n++ % 6] = 0xDEAD0000u | (u16)ipc_n;
+}
 static void dbg_hex2(unsigned col, unsigned row, u32 v);
 static void dbg_hex(unsigned col, u32 v) { dbg_hex2(col, 0, v); }
 static void dbg_hex2(unsigned col, unsigned row, u32 v)
@@ -268,8 +285,11 @@ static void dbg_bar_draw(void)
 {
     /* one line, redrawn every 16th frame: stays cheap enough not to change the timing of the game */
     if ((vbl_count & 15) != 0) return;
-    dbg_hex(8, vbl_count); dbg_hex(60, hw_dbg4()); dbg_hex(112, (rt_dbg_last << 16) | (rt_dbg_nint & 0xFFFF)); dbg_hex(164, dbg_keys); dbg_hex(216, rt_dbg_pc - boot_fast); dbg_hex(268, hw_dbg5());
-    for (unsigned y = 0; y < 8; y++) { c2p_row320(dbgrows + y * 320, buf[0] + (200 + y) * ROW_BYTES); c2p_row320(dbgrows + y * 320, buf[1] + (200 + y) * ROW_BYTES); }
+    dbg_hex(8, vbl_count); dbg_hex(60, hw_dbg4()); dbg_hex(112, (rt_dbg_last << 16) | (rt_dbg_nint & 0xFFFF)); dbg_hex(164, rd_hash); dbg_hex(216, rt_dbg_pc - boot_fast); dbg_hex(268, rd_bytes);
+    if (rt_dbg_exit_code) { dbg_hex2(164, 16, rt_dbg_exit_code); dbg_hex2(216, 16, rt_dbg_exit_a); dbg_hex2(268, 16, rt_dbg_exit_b); }
+    for (unsigned i = 0; i < 3; i++) dbg_hex2(8 + 52 * i, 16, ipc_ring[(ipc_n + i) % 6]);
+    if (dbg_regs) for (unsigned i = 0; i < 6; i++) dbg_hex2(8 + 52 * i, 8, dbg_regs[i == 4 ? 5 : i == 5 ? 6 : i]);
+    for (unsigned y = 0; y < 24; y++) { c2p_row320(dbgrows + y * 320, buf[0] + (200 + y) * ROW_BYTES); c2p_row320(dbgrows + y * 320, buf[1] + (200 + y) * ROW_BYTES); }
 }
 #endif
 static u8 conv_valid[2]; static u32 conv_start[2], conv_pitch[2];
@@ -311,7 +331,7 @@ static void display_update(void)
     dbg_conv_total++;
     conv_valid[bb] = 1; conv_start[bb] = start; conv_pitch[bb] = pitch;
 #ifdef DEBUGBAR
-    for (unsigned y = 0; y < 8; y++) c2p_row320(dbgrows + y * 320, dst + (200 + y) * ROW_BYTES);
+    for (unsigned y = 0; y < 24; y++) c2p_row320(dbgrows + y * 320, dst + (200 + y) * ROW_BYTES);
 #endif
     flip_pending = 1;
 }
@@ -337,7 +357,12 @@ long plat_file_seek(long h, long off, int whence)
     DOS(DOS_SEEK, (u32)h, (u32)off, whence == 0 ? (u32)-1 : whence == 1 ? 0u : 1u);        /* OFFSET_BEGINNING / CURRENT / END */
     return (long)DOS(DOS_SEEK, (u32)h, 0, 0);                         /* Seek returns the OLD position: ask again for the new one */
 }
-long plat_file_read(long h, void *buf_, u32 n) { return (long)DOS(DOS_READ, (u32)h, (u32)buf_, n); }
+u32 rd_hash = 2166136261u, rd_bytes;
+long plat_file_read(long h, void *buf_, u32 n) {
+    long r = (long)DOS(DOS_READ, (u32)h, (u32)buf_, n);
+    if (r > 0) { const u8 *p = buf_; for (long i = 0; i < r; i++) rd_hash = (rd_hash ^ p[i]) * 16777619u; rd_bytes += r; }
+    return r;
+}
 
 /* ------------------------------------------------------------------------------------------- audio (set up in snd.c later) */
 /* Paula: ring buffers (channel 0 = left, channel 1 = right) that loop forever; the game's Sound Blaster blocks are converted to signed 8-bit and
@@ -484,6 +509,7 @@ extern void rt_isr_return(void);
 
 static struct ctx ctx;
 
+
 static inline void dbg(u16 c) { R16(COLOR00) = c; }
 #ifndef DBG_STOP
 #define DBG_STOP 0
@@ -518,7 +544,7 @@ void amiga_main(void)
         unsigned vs = vstart, ve = vstart + SCR_H;
         R16(DIWSTRT) = (u16)(((vs & 0xFF) << 8) | 0x81);
         R16(DIWSTOP) = (u16)(((ve & 0xFF) << 8) | 0xC1);
-        R16(DIWHIGH) = (u16)(((ve >> 8) & 1) << 13);
+        R16(DIWHIGH) = (u16)((1u << 13) | (((ve >> 8) & 7) << 8) | ((vs >> 8) & 7));   /* H8 of stop (bit 13), V10-V8 of stop (bits 10-8) and of start (bits 2-0) */
         R16(DDFSTRT) = 0x0038; R16(DDFSTOP) = 0x00C8;
         R16(FMODE) = 0x0001;
         R16(BPLCON0) = BPLCON0_8PL; R16(BPLCON1) = 0; R16(BPLCON2) = 0; R16(BPLCON3) = BPLCON3_BASE; R16(BPLCON4) = BPLCON4_BASE;
@@ -563,6 +589,9 @@ void amiga_main(void)
     for (u32 i = 0; i < obj3_len; i++) w[OBJ3_BASE + i] = obj3_data[i];
     dbg(0x0F80);
     dbg(0x0F00);
+#ifdef DEBUGBAR
+    dbg_regs = ctx.regs;
+#endif
     rt_init(w, &ctx);
     rt_build_xl_tab();
     xl_tab[XL_SENTINEL_OFF] = (u32)rt_isr_return;

@@ -205,6 +205,7 @@ def main(exe, seeds_path, outs, stats=True):
             key = i.mnemonic + ' ' + i.op_str
             (unsup_trusted if a in trusted else unsup)[i.mnemonic] += 1
             if a in trusted: print('UNSUPPORTED (executed) %x: %s %s [%s]' % (a, i.mnemonic, i.op_str, e), file=sys.stderr)
+            if a not in trusted and os.environ.get('XL_SHOWUNSUP'): print('static unsupported %x: %s %s [%s] bytes %s' % (a, i.mnemonic, i.op_str, e, bytes(i.bytes).hex()), file=sys.stderr)
             lines.append(f'\tjbsr rt_unimpl\n\t.long 0x{a:x}')
         except Exception as e:
             unsup_trusted['EXC ' + i.mnemonic + ' ' + str(e)[:40]] += 1
@@ -212,6 +213,7 @@ def main(exe, seeds_path, outs, stats=True):
         starts.append(a)
     # targets outside the decoded set
     missing = sorted(t for t in targets if t not in ins and BASE <= t < BASE + len(le.mem[1]))
+    if os.environ.get('XL_SHOWUNSUP'): print('missing branch targets:', ' '.join('%x' % t for t in missing), file=sys.stderr)
     for t in missing:
         lines.append(f'{label(t)}:\n\tjbsr rt_badjump\n\t.long 0x{t:x}')
     txt = '\n'.join(lines) + '\n'

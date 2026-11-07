@@ -3,7 +3,9 @@
 | Interrupt server entry (exec server chain): A1 = is_Data, A5 = is_Code, A6 = ExecBase.  The OS acknowledges the interrupt; Z set = keep going down the chain.
     .globl  vbl_server
 vbl_server:
+    move.l  %sp,-(%sp)
     jsr     plat_isr_vbl_c
+    addq.l  #4,%sp
     moveq   #0,%d0
     rts
 

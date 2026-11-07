@@ -182,6 +182,7 @@ class X:
         """Translate capstone insn i; live = x86 flags live after it. Returns list of lines."""
         self.out = []
         m = i.mnemonic
+        if m.startswith('notrack '): m = m[8:]          # 3Eh (DS) prefix on an indirect/direct call or jump is only a CET hint here
         prefix = ''
         if m.startswith('rep'):
             prefix, m = m.split(' ', 1)

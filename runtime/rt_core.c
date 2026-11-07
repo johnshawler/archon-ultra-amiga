@@ -198,6 +198,10 @@ u32 rt_dbg_iflag;
 u32 rt_c_poll(struct regs *r) {
     rt_dbg_iflag = CTX->iflag;
     rt_dbg_irq = HEAP_END;
+#ifdef HOSTED
+    { extern u32 rt_dbg_pc; static int en = -1, cnt; static u32 lo, hi; if (en < 0) { const char *e = getenv("POLLREGS"); en = e != 0; if (e) { lo = strtoul(e, (char **)&e, 16); hi = lo + 0x20; } }
+      if (en && rt_dbg_pc >= lo && rt_dbg_pc < hi && cnt < 400) { cnt++; plat_log("pollregs pc %x eax %x ecx %x edx %x ebx %x ebp %x esi %x edi %x iflag %d\n", rt_dbg_pc, r->eax, r->ecx, r->edx, r->ebx, r->ebp, r->esi, r->edi, (int)CTX->iflag); } }
+#endif
     if (rt_replay) { CTX->poll = 1000000; return 0; }
     CTX->poll = POLL_N;
     rt_c_poll_time();

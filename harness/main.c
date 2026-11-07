@@ -11,6 +11,7 @@
 #include "../runtime/rt.h"
 #include "layout.h"
 
+extern u32 rt_heap_end, rt_heap_reserve;
 static u8 win[0x1000000 + 0x2000] __attribute__((aligned(4096)));
 static struct ctx ctx;
 extern u32 xl_entry;
@@ -23,7 +24,8 @@ long plat_file_open(const char *name) {
     char p[512], l[128]; int i = 0; for (; name[i] && i < 127; i++) l[i] = tolower((unsigned char)name[i]); l[i] = 0;
     snprintf(p, sizeof p, "%s/%s", dir, l); int fd = open(p, O_RDONLY); plat_log("harness: open \"%s\" -> %d\n", name, fd); if (fd < 0) plat_log("harness: cannot open %s\n", p); return fd;
 }
-long plat_file_read(long h, void *buf, u32 n) { return read((int)h, buf, n); }
+static u32 rd_hash = 2166136261u, rd_bytes;
+long plat_file_read(long h, void *buf, u32 n) { long r = read((int)h, buf, n); if (r > 0) { const u8 *p = buf; for (long i = 0; i < r; i++) rd_hash = (rd_hash ^ p[i]) * 16777619u; rd_bytes += r; } return r; }
 long plat_file_seek(long h, long off, int wh) { return lseek((int)h, off, wh); }
 void plat_file_close(long h) { close((int)h); }
 u32 plat_time_us(void) { return 0; }
@@ -31,7 +33,13 @@ void plat_audio_push(const unsigned char *d, u32 n, u32 rate, int is16, int ster
     if (!faudio) return; static u32 hdr_done; (void)hdr_done; fwrite(d, 1, n, faudio);
 }
 static u32 fnv(const u8 *p, u32 n, u32 h) { while (n--) { h ^= *p++; h *= 16777619u; } return h; }
+static void mscript(u32 frame) {
+    static int init; static struct { u32 f, x, y, b; } m[64]; static int n;
+    if (!init) { init = 1; const char *e = getenv("MSCRIPT"); while (e && *e && n < 64) { unsigned f, x, y, b; int k; if (sscanf(e, "%u:%u:%u:%u%n", &f, &x, &y, &b, &k) != 4) break; m[n].f = f; m[n].x = x; m[n].y = y; m[n].b = b; n++; e += k; if (*e == ',') e++; } }
+    for (int i = 0; i < n; i++) if (m[i].f == frame) { rt_mouse_set(m[i].x, m[i].y, m[i].b); plat_log("harness: mouse %u,%u b=%u at frame %u\n", m[i].x, m[i].y, m[i].b, frame); }
+}
 void plat_vsync(u32 frame) {
+    mscript(frame); if (frame % 500 == 0) { extern u32 rt_dbg_pc; plat_log("harness: frame %u reads %08x bytes %08x pc %08x vga %08x\n", frame, rd_hash, rd_bytes, rt_dbg_pc, prev_hash); }
     u32 start, pitch; int c4; vga_get_display(&start, &pitch, &c4);
     u32 h = fnv(vga_mem, sizeof vga_mem, 2166136261u); h = fnv(vga_dac, 768, h); h ^= start * 31 + pitch;
     if (h != prev_hash && fdump) {
@@ -60,6 +68,7 @@ int main(int argc, char **argv) {
     }
     rt_build_xl_tab();
     { extern void rt_isr_return(void); extern void rt_trace_isr_return(void); xl_tab[XL_SENTINEL_OFF] = (u32)rt_isr_return; xl_tab[XL_SENTINEL_TRACE_OFF] = (u32)rt_trace_isr_return; }
+    { const char *e = getenv("HEAPEND"); if (e) { rt_heap_end = strtoul(e, 0, 16); rt_heap_reserve = 0x40000; } }
     rt_init(win, &ctx);
     rt_enter(win, &ctx, OBJ3_ESP_TOP, (void *)xl_entry);
     plat_log("harness: program returned\n");
