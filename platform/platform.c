@@ -405,9 +405,12 @@ void plat_vsync(u32 frame) { (void)frame; }
 /* test-only scripted mouse (game time ms, x, y in the game's 640x200 mouse space, buttons): the positions the reference run clicked:
    both players "Computer", then START */
 static const struct { u32 ms; u16 x, y; u8 b; } tm[] = {
-    {45000,246,70,0},{45500,246,70,1},{46000,246,70,0},
-    {47500,406,70,0},{48000,406,70,1},{48500,406,70,0},
-    {50000,406,150,0},{50500,406,150,1},{51000,406,150,0},
+    {45000,240,109,0},{45500,240,109,1},{46000,240,109,0},          /* Light: Mouse */
+    {47500,254,153,0},{48000,254,153,1},{48500,254,153,0},          /* Light START */
+    {75000,310,135,0},{75500,310,135,1},{76000,310,135,0},          /* select the e-pawn */
+    {78000,310,105,0},{78500,310,105,1},{79000,310,105,0},          /* move it forward */
+    {85000,230,135,0},{85500,230,135,1},{86000,230,135,0},
+    {88000,230,105,0},{88500,230,105,1},{89000,230,105,0},
 };
 static void test_keys(void)
 {
@@ -425,8 +428,11 @@ void plat_poll(void)
 #ifdef TESTKEYS
     test_keys();
 #endif
-    if (vbl_count != shown_vbl) { shown_vbl = vbl_count; display_update(); }
-    else if (!flip_pending) display_update();
+    /* present only a finished frame: after the guest has seen vertical sync (it draws, then waits for sync), or as a fallback after 3 frames without one */
+    static u32 seen_sync, last_present;
+    if (vga_sync_seen != seen_sync || (u32)(vbl_count - last_present) > 6) {
+        if (!flip_pending) { seen_sync = vga_sync_seen; last_present = vbl_count; display_update(); }
+    }
 }
 
 /* ------------------------------------------------------------------------------------------- hardware bring-up */

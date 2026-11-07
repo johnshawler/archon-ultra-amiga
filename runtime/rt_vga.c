@@ -10,6 +10,7 @@ static u8 seq_idx, crtc_idx, gc_idx, attr_idx, attr_flip, dac_wr_idx, dac_rd_idx
 static u32 latch;
 int vga_mode13 = 0;          /* set by int 10h set mode */
 u32 vga_frame = 0;
+u32 vga_sync_seen = 0;                       /* counts guest reads of 3DA that saw vertical sync: the guest has just finished a frame */
 u32 vga_gen = 0, vga_dac_gen = 0;            /* bumped on every change that can alter the picture / the palette */
 
 #define MAPMASK (seq[2] & 15)
@@ -138,7 +139,7 @@ u32 vga_port_in(u32 port, int size, int *h) {
     case 0x3C0: return attr_idx;
     case 0x3C1: return attr[attr_idx];
     case 0x3CC: return misc;
-    case 0x3DA: case 0x3BA: attr_flip = 0; return vga_vretrace_state();
+    case 0x3DA: case 0x3BA: { attr_flip = 0; u32 st = vga_vretrace_state(); if (st & 8) vga_sync_seen++; return st; }
     }
     *h = 0; return 0xFF;
 }

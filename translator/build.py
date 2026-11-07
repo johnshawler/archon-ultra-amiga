@@ -31,37 +31,57 @@ def decode_all(le, seeds):
     roots = [BASE + le.eip] + [t[2] + BASE for s, t in fx.items() if t[1] == 1]
     work = list(roots) + [i.operands[0].imm for i in list(ins.values()) if i.operands and i.operands[0].type == X86_OP_IMM and (X86_GRP_JUMP in i.groups or X86_GRP_CALL in i.groups)]
     seen = set()
+    def tgt_of(i):
+        if (X86_GRP_JUMP in i.groups or X86_GRP_CALL in i.groups) and i.operands and i.operands[0].type == X86_OP_IMM: return i.operands[0].imm
+        return None
     strong = set(trusted) | set(roots) | set(i.operands[0].imm for i in list(ins.values()) if i.operands and i.operands[0].type == X86_OP_IMM and X86_GRP_CALL in i.groups)
-    while work:
+    def descend(work):
+      while work:
         a = work.pop()
         while BASE <= a < BASE + size:
-            if a in ins:
-                if a in seen: break
-                seen.add(a)
-            else:
-                i = dec(a)
-                if i is None: break
-                # overlap with a trusted instruction at a different alignment?
-                if any(cov[a - BASE + k] for k in range(i.size)): break
-                if any((a + k) in strong for k in range(1, i.size)): break      # would swallow a known entry point
-                ins[a] = i; seen.add(a)
-                for k in range(i.size): cov[a - BASE + k] = 2
-            i = ins[a]
-            g = set(i.groups); mn = i.mnemonic
-            nxt = a + i.size
-            if i.id in (X86_INS_RET, X86_INS_IRET, X86_INS_IRETD, X86_INS_HLT): break
-            if (X86_GRP_JUMP in g) or (X86_GRP_CALL in g):
-                op = i.operands[0] if i.operands else None
-                if op is not None and op.type == X86_OP_IMM:
-                    work.append(op.imm)
-                    if mn == 'jmp': break
-                elif op is not None:
-                    if op.type == X86_OP_MEM and op.mem.index != 0 and op.mem.scale == 4 and op.mem.base == 0:
-                        t = op.mem.disp
-                        while t in fx and fx[t][1] == 1:
-                            work.append(fx[t][2] + BASE); t += 4
-                    if mn == 'jmp': break
-            a = nxt
+              if a in ins:
+                  if a in seen: break
+                  seen.add(a)
+              else:
+                  i = dec(a)
+                  if i is None: break
+                  # overlap with a trusted instruction at a different alignment?
+                  if any(cov[a - BASE + k] for k in range(i.size)): break
+                  if any((a + k) in strong for k in range(1, i.size)): break      # would swallow a known entry point
+                  ins[a] = i; seen.add(a)
+                  for k in range(i.size): cov[a - BASE + k] = 2
+              i = ins[a]
+              g = set(i.groups); mn = i.mnemonic
+              nxt = a + i.size
+              if i.id in (X86_INS_RET, X86_INS_IRET, X86_INS_IRETD, X86_INS_HLT): break
+              if (X86_GRP_JUMP in g) or (X86_GRP_CALL in g):
+                  op = i.operands[0] if i.operands else None
+                  if op is not None and op.type == X86_OP_IMM:
+                      work.append(op.imm)
+                      if mn == 'jmp': break
+                  elif op is not None:
+                      if op.type == X86_OP_MEM and op.mem.index != 0 and op.mem.scale == 4 and op.mem.base == 0:
+                          t = op.mem.disp
+                          while t in fx and fx[t][1] == 1:
+                              work.append(fx[t][2] + BASE); t += 4
+                      if mn == 'jmp': break
+              a = nxt
+    descend(work)
+    # a branch target that statically decoded code swallowed (data decoded as code that overlaps a real entry point): drop the overlapping guess and decode from the target
+    for _ in range(50):
+        miss = []
+        for a2, i2 in list(ins.items()):
+            t = tgt_of(i2)
+            if t is not None and BASE <= t < BASE + size and t not in ins: miss.append(t)
+        if not miss: break
+        for t in set(miss):
+            for k in range(1, 15):
+                o = t - k
+                if o in ins and o not in trusted and o + ins[o].size > t:
+                    for q in range(ins[o].size): cov[o - BASE + q] = 0
+                    del ins[o]; seen.discard(o)
+            if t not in ins and not any(cov[t - BASE + q] == 1 for q in range(1)):
+                strong.add(t); descend([t])
     return ins, trusted
 
 FLAG_USE = {}

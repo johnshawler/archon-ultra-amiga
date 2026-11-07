@@ -38,7 +38,14 @@ static void mscript(u32 frame) {
     if (!init) { init = 1; const char *e = getenv("MSCRIPT"); while (e && *e && n < 64) { unsigned f, x, y, b; int k; if (sscanf(e, "%u:%u:%u:%u%n", &f, &x, &y, &b, &k) != 4) break; m[n].f = f; m[n].x = x; m[n].y = y; m[n].b = b; n++; e += k; if (*e == ',') e++; } }
     for (int i = 0; i < n; i++) if (m[i].f == frame) { rt_mouse_set(m[i].x, m[i].y, m[i].b); plat_log("harness: mouse %u,%u b=%u at frame %u\n", m[i].x, m[i].y, m[i].b, frame); }
 }
+extern void hw_key(u8 sc);
+static void kscript(u32 frame) {
+    static int init, n; static struct { u32 f; u8 sc; } k[256];
+    if (!init) { init = 1; const char *e = getenv("KSCRIPT"); while (e && *e && n < 256) { unsigned f, c; int l; if (sscanf(e, "%u:%x%n", &f, &c, &l) != 2) break; k[n].f = f; k[n].sc = c; n++; e += l; if (*e == ',') e++; } }
+    for (int i = 0; i < n; i++) if (k[i].f == frame) { hw_key(k[i].sc); plat_log("harness: key %02x at frame %u\n", k[i].sc, frame); }
+}
 void plat_vsync(u32 frame) {
+    kscript(frame);
     mscript(frame); if (frame % 500 == 0) { extern u32 rt_dbg_pc; plat_log("harness: frame %u reads %08x bytes %08x pc %08x vga %08x\n", frame, rd_hash, rd_bytes, rt_dbg_pc, prev_hash); }
     u32 start, pitch; int c4; vga_get_display(&start, &pitch, &c4);
     u32 h = fnv(vga_mem, sizeof vga_mem, 2166136261u); h = fnv(vga_dac, 768, h); h ^= start * 31 + pitch;

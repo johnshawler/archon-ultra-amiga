@@ -91,7 +91,7 @@ int  vga_in_window(u32 a);
 u32  vga_port_in(u32 port, int size, int *handled);
 int  vga_port_out(u32 port, u32 val, int size);
 extern u8 vga_mem[262144];
-extern u32 vga_gen, vga_dac_gen;
+extern u32 vga_gen, vga_dac_gen, vga_sync_seen;
 extern u8 vga_dac[768];
 void vga_vsync(void);
 /* hw */
