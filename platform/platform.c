@@ -218,22 +218,23 @@ static u8 joy_read(void)
     return b;
 }
 /* mouse (port 1): position in the DOS mouse coordinate system */
-static u8 mouse_px, mouse_py; static int mouse_x = 320, mouse_y = 100;
+static u8 mouse_px, mouse_py; static volatile int mouse_pdx, mouse_pdy;
 static void mouse_accum(void)       /* called from the 50 Hz vertical-blank server: the 8-bit hardware counters must be read often enough not to wrap */
 {
     u16 m = R16(JOY0DAT); u8 x = (u8)m, y = (u8)(m >> 8);
     s8 dx = (s8)(x - mouse_px), dy = (s8)(y - mouse_py);
     mouse_px = x; mouse_py = y;
-    mouse_x += dx * 2; mouse_y += dy;
-    if (mouse_x < 0) mouse_x = 0; if (mouse_x > 639) mouse_x = 639;
-    if (mouse_y < 0) mouse_y = 0; if (mouse_y > 199) mouse_y = 199;
+    mouse_pdx += dx * 2; mouse_pdy += dy;
 }
 static void mouse_update(void)
 {
     u32 b = 0;
+    int dx, dy;
+    do { dx = mouse_pdx; dy = mouse_pdy; } while (dx != mouse_pdx || dy != mouse_pdy);
+    mouse_pdx -= dx; mouse_pdy -= dy;
     if (!(CIAA(C_PRA) & 0x40)) b |= 1;
     if (!(R16(POTGOR) & 0x0400)) b |= 2;
-    rt_mouse_set((u32)mouse_x, (u32)mouse_y, b);
+    rt_mouse_move(dx, dy, b);
 }
 static void input_poll(void)
 {
@@ -554,10 +555,10 @@ void amiga_main(void)
         R16(FMODE) = 0x0001;
         R16(BPLCON0) = BPLCON0_8PL; R16(BPLCON1) = 0; R16(BPLCON2) = 0; R16(BPLCON3) = BPLCON3_BASE; R16(BPLCON4) = BPLCON4_BASE;
         R16(BPL1MOD) = 280; R16(BPL2MOD) = 280;
-        /* the copper re-establishes the whole display set-up at the top of every frame, so nothing the OS does to the custom registers can leak into the picture (inverted colours: BPLCON4 XOR bits) */
+        /* the copper re-establishes the whole display set-up at the top of every frame, (not BPLCON3: the vertical-blank palette load owns its bank bits and the copper must not race it) so nothing the OS does to the custom registers can leak into the picture (inverted colours: BPLCON4 XOR bits) */
         static const u16 rg[][2] = {
             {DIWSTRT, 0}, {DIWSTOP, 0}, {DIWHIGH, 0}, {DDFSTRT, 0x0038}, {DDFSTOP, 0x00C8}, {FMODE, 0x0001}, {BPLCON0, BPLCON0_8PL}, {BPLCON1, 0}, {BPLCON2, 0},
-            {BPLCON3, BPLCON3_BASE}, {BPLCON4, BPLCON4_BASE}, {BPL1MOD, 280}, {BPL2MOD, 280}, {CLXCON, 0}, {CLXCON2, 0} };
+            {BPLCON4, BPLCON4_BASE}, {BPL1MOD, 280}, {BPL2MOD, 280}, {CLXCON, 0}, {CLXCON2, 0} };
         unsigned n = 64;
         for (unsigned i = 0; i < sizeof rg / sizeof rg[0]; i++) {
             u16 v = rg[i][1];

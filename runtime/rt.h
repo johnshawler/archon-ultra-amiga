@@ -73,6 +73,7 @@ void rt_init(u8 *win, struct ctx *ctx);
 void rt_enter(u8 *win, struct ctx *ctx, u32 esp, void *entry);
 void hw_key(u8 sc);
 void rt_mouse_set(u32 x, u32 y, u32 b);
+void rt_mouse_move(int dx, int dy, u32 b);
 extern u32 rt_joy_bits;
 void vga_get_display(u32 *start, u32 *pitch, int *chain4);
 u32 vga_pan(void);

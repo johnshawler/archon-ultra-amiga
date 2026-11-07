@@ -338,7 +338,8 @@ static int int33(struct regs *r) {
 #endif
     switch (ax) {
     case 0: r->eax = 0xFFFF; r->ebx = 2; return 0;
-    case 1: case 2: case 4: case 7: case 8: case 0x0A: case 0x0F: case 0x1D: return 0;
+    case 4: { mouse_x = r->ecx & 0xFFFF; mouse_y = r->edx & 0xFFFF; if (mouse_x > 639) mouse_x = 639; if (mouse_y > 199) mouse_y = 199; return 0; }
+    case 1: case 2: case 7: case 8: case 0x0A: case 0x0F: case 0x1D: return 0;
     case 3: r->ebx = mouse_b; r->ecx = mouse_x; r->edx = mouse_y; return 0;
     case 0x0B: r->ecx = 0; r->edx = 0; return 0;
     case 0x24: r->ebx = 0x0626; r->ecx = 0x0400; return 0;
@@ -382,6 +383,8 @@ void rt_init(u8 *win, struct ctx *ctx) {
     { const char *env = "PATH=Z:\\\0COMSPEC=Z:\\COMMAND.COM\0BLASTER=A220 I7 D1 H5 T6"; u32 p = 0x1880; { const char *q = env; for (int k = 0; k < 3; k++) { while (*q) WIN[p++] = *q++; WIN[p++] = 0; q++; } } WIN[p++] = 0; st16(p, 1); p += 2;
       const char *pn = "C:\\ARCHON.EXE"; for (const char *q = pn; *q; q++) WIN[p++] = *q; WIN[p++] = 0; }
 }
+/* relative movement from the platform (the driver clamps the logical pointer; INT 33h function 4 repositions it) */
+void rt_mouse_move(int dx, int dy, u32 b) { int x = (int)mouse_x + dx, y = (int)mouse_y + dy; if (x < 0) x = 0; if (x > 639) x = 639; if (y < 0) y = 0; if (y > 199) y = 199; mouse_x = (u32)x; mouse_y = (u32)y; mouse_b = b; }
 void rt_mouse_set(u32 x, u32 y, u32 b) { mouse_x = x; mouse_y = y; mouse_b = b; }
 
 #ifdef HOSTED
