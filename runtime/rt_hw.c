@@ -64,7 +64,15 @@ static void pic_out(int c, u32 port, u8 v) {
     }
 }
 
-u32 rt_joy_bits; static u32 joy_t0, pulse_bits;      /* 1 up 2 down 4 left 8 right 16 fire 32 button 2 (set by the platform) */
+u32 rt_joy_bits; static u32 joy_t0, pulse_bits;
+/* The game times the joystick one-shots with PIT channel 2 and throws a sample away when two consecutive counter reads are 100 or more ticks (84 us) apart, taken as an interrupt hit.  Our port
+   accesses cost more than that on a 68030, so while a measurement runs (from the first read of 0x201) channel 2 and the game port use a virtual clock that advances 2 us per port access. */
+static int joy_virt; static u32 joy_vt, joy_vt0;
+#ifdef HOSTED
+#define JNOW() LIVE_US()
+#else
+#define JNOW() (joy_virt ? joy_vt : LIVE_US())
+#endif      /* 1 up 2 down 4 left 8 right 16 fire 32 button 2 (set by the platform) */
 /* ---- PIT */
 #ifdef HOSTED
 #define LIVE_US() now
@@ -93,7 +101,7 @@ static u32 pit_count(int ch) {
 #else
 static u32 pit_count(int ch) {
     struct pit *p = &pit[ch]; u32 rl = p->reload ? p->reload : 65536;
-    u64 ticks = ((u64)(u32)(LIVE_US() - p->start_us) * 1193182u + 999999u) / 1000000u;      /* integer version of the same maths */
+    u64 ticks = ((u64)(u32)((ch == 2 ? JNOW() : LIVE_US()) - p->start_us) * 1193182u + 999999u) / 1000000u;      /* integer version of the same maths */
     if (p->mode == 0 || p->mode == 4) {
         if (ticks > rl) { u32 t = (u32)((ticks - rl) % 65536u); return (0xffffu - t) & 0xFFFF; }
         return (u32)(rl - (u32)ticks) & 0xFFFF;
@@ -109,9 +117,9 @@ static void pit_out(u32 port, u8 v) {
         pit[ch].rw = (v >> 4) & 3; pit[ch].mode = (v >> 1) & 7; pit[ch].wr_state = 0; return;
     }
     int ch = port - 0x40; struct pit *p = &pit[ch];
-    if (p->rw == 1) { p->reload = v; p->start_us = LIVE_US(); HOSTED_START_D }
-    else if (p->rw == 2) { p->reload = v << 8; p->start_us = LIVE_US(); HOSTED_START_D }
-    else { if (!p->wr_state) { p->wr_lo = v; p->wr_state = 1; } else { p->reload = (v << 8) | p->wr_lo; p->wr_state = 0; p->start_us = LIVE_US(); HOSTED_START_D if (ch == 0) p->phase_us = LIVE_US(); } }
+    if (p->rw == 1) { p->reload = v; p->start_us = (ch == 2 ? JNOW() : LIVE_US()); HOSTED_START_D }
+    else if (p->rw == 2) { p->reload = v << 8; p->start_us = (ch == 2 ? JNOW() : LIVE_US()); HOSTED_START_D }
+    else { if (!p->wr_state) { p->wr_lo = v; p->wr_state = 1; } else { p->reload = (v << 8) | p->wr_lo; p->wr_state = 0; p->start_us = (ch == 2 ? JNOW() : LIVE_US()); HOSTED_START_D if (ch == 0) p->phase_us = LIVE_US(); } }
 }
 static u32 pit_in(u32 port) {
     int ch = port - 0x40; struct pit *p = &pit[ch];
@@ -247,6 +255,7 @@ u32 vga_vretrace_state(void) {
 
 /* ---- dispatch of ports */
 int hw_port_out(u32 port, u32 v, int size) {
+    if (joy_virt) { joy_vt += 2; if ((u32)(joy_vt - joy_vt0) > 4000) joy_virt = 0; }
     if (size > 1) { hw_port_out(port, v & 0xFF, 1); hw_port_out(port + 1, (v >> 8) & 0xFF, 1); return 1; }
     if (port == 0x20 || port == 0x21) { pic_out(0, port, v); if (port == 0x21) plat_log("hw: imr0=%02x\n", v); return 1; }
     if (port == 0xA0 || port == 0xA1) { if (port == 0xA1) plat_log("hw: imr1=%02x\n", v); pic_out(1, port, v); return 1; }
@@ -255,7 +264,7 @@ int hw_port_out(u32 port, u32 v, int size) {
     if (port == 0x70) { cmos_idx = v & 0x7F; return 1; }
     if (port == 0x71) { if (cmos_idx != 0x0F) plat_log("hw: cmos[%02x]=%02x\n", cmos_idx, v); cmos[cmos_idx] = v; if (cmos_idx == 0x0B || cmos_idx == 0x0A) rtc_last_us = now; return 1; }
     if (port == 0x60 || port == 0x64) return 1;
-    if (port == 0x201) { joy_t0 = LIVE_US(); return 1; }
+    if (port == 0x201) { joy_t0 = JNOW(); return 1; }
     /* DMA */
     if (port >= 0x00 && port <= 0x0F) {
         int ch = (port >> 1) & 3;
@@ -288,6 +297,7 @@ int hw_port_out(u32 port, u32 v, int size) {
     return 0;
 }
 u32 hw_port_in(u32 port, int size, int *h) {
+    if (joy_virt) { joy_vt += 2; if ((u32)(joy_vt - joy_vt0) > 4000) joy_virt = 0; }
     *h = 1;
     if (size > 1) { u32 lo = hw_port_in(port, 1, h); u32 hi = hw_port_in(port + 1, 1, h); return lo | (hi << 8); }
     if (port == 0x20) return isr[0]; if (port == 0xA0) return isr[1];
@@ -320,8 +330,9 @@ u32 hw_port_in(u32 port, int size, int *h) {
     if (port >= 0x388 && port <= 0x38B) return 0;
     if (port == 0x201) {
         /* analog game port: a write fires the one-shots; an axis bit stays set for a time proportional to the stick position (digital stick: left/up short, centre, right/down long) */
-        u32 dt = (u32)(LIVE_US() - joy_t0), b = 0xC0;
-        u32 wx = (rt_joy_bits & 4) ? 100 : (rt_joy_bits & 8) ? 550 : 300, wy = (rt_joy_bits & 1) ? 100 : (rt_joy_bits & 2) ? 550 : 300;
+        if (!joy_virt) { joy_virt = 1; joy_vt = joy_vt0 = LIVE_US(); }
+        u32 dt = (u32)(JNOW() - joy_t0), b = 0xC0;
+        u32 wx = (rt_joy_bits & 4) ? 120 : (rt_joy_bits & 8) ? 480 : 300, wy = (rt_joy_bits & 1) ? 120 : (rt_joy_bits & 2) ? 480 : 300;
         /* a button press is reported as one short pulse per physical press (the game reads the level on every poll and would count a held button many times) */
         { static u32 prev, t0; u32 now_us = LIVE_US(), nb = rt_joy_bits & 48; u32 fresh = nb & ~prev; prev = nb; if (fresh) t0 = now_us; if ((u32)(now_us - t0) > 60000u) nb = 0; if (!fresh && (u32)(now_us - t0) > 60000u) nb = 0; pulse_bits = nb; }
         if (dt < wx) b |= 1; if (dt < wy) b |= 2;

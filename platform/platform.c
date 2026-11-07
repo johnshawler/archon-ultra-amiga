@@ -243,10 +243,10 @@ static void input_poll(void)
         u8 code = (d >> 1) & 0x7F, up = d & 1;
         if (code < 0x68) push_scan(amiga2pc[code], up);
     }
-    /* a direction is held for at least 5 frames (100 ms) so that the game's slow joystick polling cannot miss a tap; the same state also drives the arrow keys
+    /* a direction is held for at least 3 frames (60 ms) so that the game's slow joystick polling cannot miss a tap; the same state also drives the arrow keys
        (Keyboard mode of the Dark side) */
     { static u32 hold_until[4]; u8 raw = joy_read(), j = raw & 0x30;
-      for (unsigned k = 0; k < 4; k++) { if (raw & (1u << k)) hold_until[k] = vbl_count + 5; if ((s32)(hold_until[k] - vbl_count) > 0) j |= (u8)(1u << k); }
+      for (unsigned k = 0; k < 4; k++) { if (raw & (1u << k)) hold_until[k] = vbl_count + 3; if ((s32)(hold_until[k] - vbl_count) > 0) j |= (u8)(1u << k); }
       u8 ch = (u8)(j ^ joy_prev);
       if (ch) {
         if (ch & J_UP) push_scan(0xC8, !(j & J_UP));
