@@ -75,6 +75,7 @@ void plat_exit(int code) { (void)code; for (;;) R16(COLOR00) = (u16)(0x0F00 | (c
 
 /* ------------------------------------------------------------------------------------------- chip block */
 #define CHIP_COP 0x0000          /* copper list */
+#define CHIP_COP2 0x0400         /* second copper list (display buffer 1) */
 #define CHIP_SPR 0x0800          /* null sprite */
 #define CHIP_AUD 0x1000          /* four audio rings */
 #define CHIP_BUF0 0x10000        /* two 64000-byte display buffers */
@@ -118,6 +119,14 @@ static void load_palette(void)
     }
     R16(BPLCON3) = BPLCON3_BASE;
 }
+static u32 cop_addr[2];
+static void set_planes(u16 *list, const u8 *b)
+{
+    for (unsigned p = 0; p < 8; p++) {
+        u32 a = (u32)b + p * 40;
+        list[32 + p * 4 + 1] = (u16)(a >> 16); list[32 + p * 4 + 3] = (u16)a;
+    }
+}
 static void apply_bpl_ptrs(const u8 *b)
 {
     for (unsigned p = 0; p < 8; p++) {
@@ -143,7 +152,8 @@ void plat_isr_vbl_c(u32 *sp)
     sample_ipc((u16 *)sp);
     dbg_bar_draw();
 #endif
-    if (flip_pending) { front ^= 1; apply_bpl_ptrs(buf[front]); flip_pending = 0; }
+    /* one copper list per display buffer: a flip is a single COP1LC write, so the copper can never read half-updated bitplane pointers */
+    if (flip_pending) { front ^= 1; R32(COP1LC) = cop_addr[front]; flip_pending = 0; }
     if (pal_pending) { load_palette(); pal_pending = 0; }
 }
 
@@ -315,6 +325,7 @@ static void display_update(void)
     u32 gen = vga_gen;
     if (vga_dac_gen != pal_gen_done) {
         pal_gen_done = vga_dac_gen;
+        pal_pending = 0;                                   /* the VBL server must not load a half-written table */
         for (unsigned i = 0; i < 256; i++) {
             u32 r = vga_dac[i * 3] & 63, g = vga_dac[i * 3 + 1] & 63, b = vga_dac[i * 3 + 2] & 63;
             r = (r << 2) | (r >> 4); g = (g << 2) | (g >> 4); b = (b << 2) | (b >> 4);
@@ -605,7 +616,13 @@ void amiga_main(void)
         }
         cop[n++] = 0xFFFF; cop[n++] = 0xFFFE;
     }
-    R32(COP1LC) = (u32)chip + CHIP_COP; R16(COPJMP1) = 0;
+    {
+        u16 *cop1 = (u16 *)(chip + CHIP_COP2);
+        for (unsigned i = 0; i < 128; i++) cop1[i] = cop[i];
+        set_planes(cop, buf[0]); set_planes(cop1, buf[1]);
+        cop_addr[0] = (u32)chip + CHIP_COP; cop_addr[1] = (u32)chip + CHIP_COP2;
+    }
+    R32(COP1LC) = cop_addr[0]; R16(COPJMP1) = 0;
     STOP(3, 0x000F);
 
     /* system hooks: vertical-blank server (frame flips, palette, clock) and an input.device handler (keyboard) */
