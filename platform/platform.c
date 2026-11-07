@@ -377,22 +377,18 @@ void plat_vsync(u32 frame) { (void)frame; }
 
 /* ------------------------------------------------------------------------------------------- polling hook called by the runtime */
 #ifdef TESTKEYS
-/* test-only scripted keyboard (game time ms, PC scancode; bit 7 = release): Light keyboard = E/S/D/F move, space = fire */
-static const struct { u32 ms; u8 sc; } tk[] = {
-    /* Light: three presses of D (down) to START, fire */
-    {50000,0x20},{50150,0xA0},{50600,0x20},{50750,0xA0},{51200,0x20},{51350,0xA0},{52000,0x39},{52200,0xB9},
-    /* Dark: three presses of cursor-down (E0 prefix) to START, fire (keypad 0) */
-    {54000,0xE0},{54010,0x50},{54150,0xE0},{54160,0xD0},{54600,0xE0},{54610,0x50},{54750,0xE0},{54760,0xD0},{55200,0xE0},{55210,0x50},{55350,0xE0},{55360,0xD0},
-    {56000,0x52},{56200,0xD2},
-    /* in the game: Light fires on the piece under the cursor */
-    {90000,0x39},{90200,0xB9},
-    {100000,0x21},{100150,0xA1},{102000,0x39},{102200,0xB9},
+/* test-only scripted mouse (game time ms, x, y in the game's 640x200 mouse space, buttons): the positions the reference run clicked:
+   both players "Computer", then START */
+static const struct { u32 ms; u16 x, y; u8 b; } tm[] = {
+    {45000,246,70,0},{45500,246,70,1},{46000,246,70,0},
+    {47500,406,70,0},{48000,406,70,1},{48500,406,70,0},
+    {50000,406,150,0},{50500,406,150,1},{51000,406,150,0},
 };
-static unsigned tk_i;
 static void test_keys(void)
 {
-    u32 ms = plat_time_us() / 1000;
-    while (tk_i < sizeof tk / sizeof tk[0] && ms >= tk[tk_i].ms) { hw_key(tk[tk_i].sc); tk_i++; }
+    u32 ms = plat_time_us() / 1000; int k = -1;
+    for (unsigned i = 0; i < sizeof tm / sizeof tm[0]; i++) if (ms >= tm[i].ms) k = (int)i;
+    if (k >= 0) rt_mouse_set(tm[k].x, tm[k].y, tm[k].b);
 }
 #endif
 void plat_poll(void)
