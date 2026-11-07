@@ -64,6 +64,7 @@ static void pic_out(int c, u32 port, u8 v) {
     }
 }
 
+u32 rt_joy_bits; static u32 joy_t0;      /* 1 up 2 down 4 left 8 right 16 fire 32 button 2 (set by the platform) */
 /* ---- PIT */
 #ifdef HOSTED
 #define LIVE_US() now
@@ -254,6 +255,7 @@ int hw_port_out(u32 port, u32 v, int size) {
     if (port == 0x70) { cmos_idx = v & 0x7F; return 1; }
     if (port == 0x71) { if (cmos_idx != 0x0F) plat_log("hw: cmos[%02x]=%02x\n", cmos_idx, v); cmos[cmos_idx] = v; if (cmos_idx == 0x0B || cmos_idx == 0x0A) rtc_last_us = now; return 1; }
     if (port == 0x60 || port == 0x64) return 1;
+    if (port == 0x201) { joy_t0 = LIVE_US(); return 1; }
     /* DMA */
     if (port >= 0x00 && port <= 0x0F) {
         int ch = (port >> 1) & 3;
@@ -316,7 +318,14 @@ u32 hw_port_in(u32 port, int size, int *h) {
         return 0xFF;
     }
     if (port >= 0x388 && port <= 0x38B) return 0;
-    if (port == 0x201) return 0xFF;
+    if (port == 0x201) {
+        /* analog game port: a write fires the one-shots; an axis bit stays set for a time proportional to the stick position (digital stick: left/up short, centre, right/down long) */
+        u32 dt = (u32)(LIVE_US() - joy_t0), b = 0xC0;
+        u32 wx = (rt_joy_bits & 4) ? 150 : (rt_joy_bits & 8) ? 900 : 500, wy = (rt_joy_bits & 1) ? 150 : (rt_joy_bits & 2) ? 900 : 500;
+        if (dt < wx) b |= 1; if (dt < wy) b |= 2;
+        if (!(rt_joy_bits & 16)) b |= 0x10; if (!(rt_joy_bits & 32)) b |= 0x20;
+        return b;
+    }
     *h = 0; return 0xFF;
 }
 void hw_init(void) {

@@ -234,16 +234,7 @@ static void input_poll(void)
         u8 code = (d >> 1) & 0x7F, up = d & 1;
         if (code < 0x68) push_scan(amiga2pc[code], up);
     }
-    u8 j = joy_read(), ch = (u8)(j ^ joy_prev);
-    if (ch) {
-        if (ch & J_UP) push_scan(0xC8, !(j & J_UP));
-        if (ch & J_DOWN) push_scan(0xD0, !(j & J_DOWN));
-        if (ch & J_LEFT) push_scan(0xCB, !(j & J_LEFT));
-        if (ch & J_RIGHT) push_scan(0xCD, !(j & J_RIGHT));
-        if (ch & J_FIRE) push_scan(0x52, !(j & J_FIRE));          /* button A = numeric keypad 0 */
-        if (ch & J_FIRE2) push_scan(0x53, !(j & J_FIRE2));        /* button B = numeric keypad . */
-        joy_prev = j;
-    }
+    rt_joy_bits = joy_read();                       /* the game reads the joystick through port 0x201 */
     mouse_update();
 }
 
