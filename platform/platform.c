@@ -158,10 +158,12 @@ static volatile u8 kq[64]; static volatile u8 kq_head, kq_tail;
 /* input.device handler: sees every raw key event (class 1, code in ie_Code, bit 7 = key up) before the rest of the system and queues it in the same form
    the old CIA-A handler produced ((code << 1) | up), then lets the event continue. */
 struct ievent { struct ievent *next; u8 cls, sub; u16 code, qual; };
+u32 dbg_keys;
 void *input_handler_c(struct ievent *ev)
 {
     for (struct ievent *e = ev; e; e = e->next)
         if (e->cls == 1) {
+            dbg_keys = ((dbg_keys + 0x10000u) & 0xFFFF0000u) | (e->code & 0xFFFF);
             u8 d = (u8)(((e->code & 0x7F) << 1) | ((e->code >> 7) & 1));
             u8 h = kq_head, nh = (u8)((h + 1) & 63);
             if (nh != kq_tail) { kq[h] = d; kq_head = nh; }
@@ -242,7 +244,8 @@ static void input_poll(void)
 /* ------------------------------------------------------------------------------------------- display */
 static u32 shown_gen = 0xFFFFFFFFu;
 #ifdef DEBUGBAR
-extern u32 dbg_pc; extern u32 hw_dbg1(void), hw_dbg2(void), hw_dbg3(void), hw_dbg4(void), hw_dbg5(void), rt_dbg_iflag;
+extern u32 dbg_pc; extern u32 dbg_keys;
+extern u32 hw_dbg1(void), hw_dbg2(void), hw_dbg3(void), hw_dbg4(void), hw_dbg5(void), rt_dbg_iflag;
 extern u32 rt_dbg_hist[32], rt_dbg_exit_code, rt_dbg_exit_a, rt_dbg_exit_b;
 extern u32 rt_dbg_port, rt_dbg_pc;
 extern u32 hw_dbg1(void), hw_dbg2(void);
@@ -265,7 +268,7 @@ static void dbg_bar_draw(void)
 {
     /* one line, redrawn every 16th frame: stays cheap enough not to change the timing of the game */
     if ((vbl_count & 15) != 0) return;
-    dbg_hex(8, vbl_count); dbg_hex(60, hw_dbg4()); dbg_hex(112, (rt_dbg_last << 16) | (rt_dbg_nint & 0xFFFF)); dbg_hex(164, hw_dbg2()); dbg_hex(216, rt_dbg_pc - boot_fast); dbg_hex(268, hw_dbg5());
+    dbg_hex(8, vbl_count); dbg_hex(60, hw_dbg4()); dbg_hex(112, (rt_dbg_last << 16) | (rt_dbg_nint & 0xFFFF)); dbg_hex(164, dbg_keys); dbg_hex(216, rt_dbg_pc - boot_fast); dbg_hex(268, hw_dbg5());
     for (unsigned y = 0; y < 8; y++) { c2p_row320(dbgrows + y * 320, buf[0] + (200 + y) * ROW_BYTES); c2p_row320(dbgrows + y * 320, buf[1] + (200 + y) * ROW_BYTES); }
 }
 #endif
@@ -376,11 +379,14 @@ void plat_vsync(u32 frame) { (void)frame; }
 #ifdef TESTKEYS
 /* test-only scripted keyboard (game time ms, PC scancode; bit 7 = release): Light keyboard = E/S/D/F move, space = fire */
 static const struct { u32 ms; u8 sc; } tk[] = {
-    {60000,0x20},{60150,0xA0},{60500,0x20},{60650,0xA0},{61000,0x20},{61150,0xA0},{61500,0x20},{61650,0xA0},{62000,0x20},{62150,0xA0},{62500,0x20},{62650,0xA0},
-    {64000,0x39},{64200,0xB9},                                    /* fire on START */
-    {95000,0x39},{95200,0xB9},                                    /* fire: select the piece under the cursor */
-    {110000,0x21},{110150,0xA1},                                  /* F: move the cursor right */
-    {115000,0x39},{115200,0xB9},
+    /* Light: three presses of D (down) to START, fire */
+    {50000,0x20},{50150,0xA0},{50600,0x20},{50750,0xA0},{51200,0x20},{51350,0xA0},{52000,0x39},{52200,0xB9},
+    /* Dark: three presses of cursor-down (E0 prefix) to START, fire (keypad 0) */
+    {54000,0xE0},{54010,0x50},{54150,0xE0},{54160,0xD0},{54600,0xE0},{54610,0x50},{54750,0xE0},{54760,0xD0},{55200,0xE0},{55210,0x50},{55350,0xE0},{55360,0xD0},
+    {56000,0x52},{56200,0xD2},
+    /* in the game: Light fires on the piece under the cursor */
+    {90000,0x39},{90200,0xB9},
+    {100000,0x21},{100150,0xA1},{102000,0x39},{102200,0xB9},
 };
 static unsigned tk_i;
 static void test_keys(void)
