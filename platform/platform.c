@@ -167,13 +167,16 @@ struct ievent { struct ievent *next; u8 cls, sub; u16 code, qual; };
 u32 dbg_keys;
 void *input_handler_c(struct ievent *ev)
 {
-    for (struct ievent *e = ev; e; e = e->next)
-        if (e->cls == 1) {
+    for (struct ievent *e = ev; e; e = e->next) {
+        u8 cls = e->cls;
+        e->cls = 0;                           /* IECLASS_NULL: Intuition must not see the events (it would re-install the Workbench copper list and palette when the pointer moves) */
+        if (cls == 1) {
             dbg_keys = ((dbg_keys + 0x10000u) & 0xFFFF0000u) | (e->code & 0xFFFF);
             u8 d = (u8)(((e->code & 0x7F) << 1) | ((e->code >> 7) & 1));
             u8 h = kq_head, nh = (u8)((h + 1) & 63);
             if (nh != kq_tail) { kq[h] = d; kq_head = nh; }
         }
+    }
     return ev;
 }
 

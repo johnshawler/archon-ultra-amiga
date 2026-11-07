@@ -64,7 +64,7 @@ static void pic_out(int c, u32 port, u8 v) {
     }
 }
 
-u32 rt_joy_bits; static u32 joy_t0;      /* 1 up 2 down 4 left 8 right 16 fire 32 button 2 (set by the platform) */
+u32 rt_joy_bits; static u32 joy_t0, pulse_bits;      /* 1 up 2 down 4 left 8 right 16 fire 32 button 2 (set by the platform) */
 /* ---- PIT */
 #ifdef HOSTED
 #define LIVE_US() now
@@ -321,9 +321,11 @@ u32 hw_port_in(u32 port, int size, int *h) {
     if (port == 0x201) {
         /* analog game port: a write fires the one-shots; an axis bit stays set for a time proportional to the stick position (digital stick: left/up short, centre, right/down long) */
         u32 dt = (u32)(LIVE_US() - joy_t0), b = 0xC0;
-        u32 wx = (rt_joy_bits & 4) ? 150 : (rt_joy_bits & 8) ? 900 : 500, wy = (rt_joy_bits & 1) ? 150 : (rt_joy_bits & 2) ? 900 : 500;
+        u32 wx = (rt_joy_bits & 4) ? 100 : (rt_joy_bits & 8) ? 550 : 300, wy = (rt_joy_bits & 1) ? 100 : (rt_joy_bits & 2) ? 550 : 300;
+        /* a button press is reported as one short pulse per physical press (the game reads the level on every poll and would count a held button many times) */
+        { static u32 prev, t0; u32 now_us = LIVE_US(), nb = rt_joy_bits & 48; u32 fresh = nb & ~prev; prev = nb; if (fresh) t0 = now_us; if ((u32)(now_us - t0) > 60000u) nb = 0; if (!fresh && (u32)(now_us - t0) > 60000u) nb = 0; pulse_bits = nb; }
         if (dt < wx) b |= 1; if (dt < wy) b |= 2;
-        if (!(rt_joy_bits & 16)) b |= 0x10; if (!(rt_joy_bits & 32)) b |= 0x20;
+        if (!(pulse_bits & 16)) b |= 0x10; if (!(pulse_bits & 32)) b |= 0x20;
         return b;
     }
     *h = 0; return 0xFF;
